@@ -1397,18 +1397,20 @@ async def process_mp3_cover_photo(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Entry points must return a state (e.g. MAIN_MENU). Returning None ends the conversation
+    # and inline callbacks (mp3_*) stop working until /start again.
     if not can_publish_to_channel(update):
         await update.message.reply_text(
             "Нет доступа к публикации в канал. Попроси админа добавить твой user_id в список публикаторов."
         )
-        return
+        return MAIN_MENU
     audio = update.message.audio
     if not audio:
-        return
+        return MAIN_MENU
     file_name = audio.file_name or "track.mp3"
     if not file_name.lower().endswith(".mp3"):
         await update.message.reply_text("Нужен именно MP3-файл.")
-        return
+        return MAIN_MENU
     draft_name = f"draft_{update.effective_user.id}_{audio.file_unique_id}.mp3"
     telegram_file = await audio.get_file()
     await telegram_file.download_to_drive(draft_name)
@@ -1422,6 +1424,7 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.pop("mp3_preview_chat_id", None)
     context.user_data.pop("mp3_audio_message_id", None)
     await show_mp3_metadata_screen(update, context)
+    return MAIN_MENU
 
 
 async def _mp3_cleanup_draft(context):
