@@ -79,7 +79,11 @@ STYLE_TOKENS = [
     "phonk",
     "hyperpop",
 ]
-KEY_PATTERN = re.compile(r"\b([A-G](?:#|b)?(?:m|maj|min)?)\b", re.IGNORECASE)
+# Ключ: C, Cm, C#m, C#min, D#m, Bbm …
+KEY_PATTERN = re.compile(
+    r"\b([A-G](?:#|b|♯)?(?:min|m|maj)?)\b",
+    re.IGNORECASE,
+)
 BPM_PATTERN = re.compile(r"\b(\d{2,3})\s*BPM\b", re.IGNORECASE)
 FALLBACK_BPM_PATTERN = re.compile(r"\b(\d{2,3})\b")
 
@@ -234,92 +238,193 @@ def normalize_key(raw_key):
         key = key[:-3]
     if len(key) == 1:
         return key.upper()
+    if len(key) == 2:
+        return key[0].upper() + key[1].lower()
     return f"{key[0].upper()}{key[1:]}"
 
 
-def parse_audio_filename(file_name):
-    stem = os.path.splitext(file_name or "")[0]
-    working = stem
+def strip_handles(text):
+    return re.sub(r"\s*@\w+\s*", " ", text or "").strip()
 
+
+def parse_audio_filename(file_name):
+    """Разбор строки как у Tracy 169 BPM C#min JERK или rampage 164 @user @wutshy."""
+    stem = os.path.splitext(file_name or "")[0]
+    working = strip_handles(stem)
+    working = re.sub(r"\s+", " ", working).strip()
+
+    bpm = None
     bpm_match = BPM_PATTERN.search(working)
-    bpm = int(bpm_match.group(1)) if bpm_match else None
     if bpm_match:
+        bpm = int(bpm_match.group(1))
         working = BPM_PATTERN.sub(" ", working)
     if bpm is None:
-        fallback = FALLBACK_BPM_PATTERN.search(working)
-        if fallback:
-            maybe_bpm = int(fallback.group(1))
-            if 60 <= maybe_bpm <= 220:
-                bpm = maybe_bpm
+        fb = FALLBACK_BPM_PATTERN.search(working)
+        if fb:
+            cand = int(fb.group(1))
+            if 60 <= cand <= 220:
+                bpm = cand
                 working = FALLBACK_BPM_PATTERN.sub(" ", working, count=1)
 
-    key_match = KEY_PATTERN.search(working)
-    key = normalize_key(key_match.group(1)) if key_match else ""
-    if key_match:
+    key = ""
+    km = KEY_PATTERN.search(working)
+    if km:
+        key = normalize_key(km.group(1))
         working = KEY_PATTERN.sub(" ", working, count=1)
 
     style = ""
-    lowered = working.lower()
-    for token in STYLE_TOKENS:
-        if token in lowered:
+    low = working.lower()
+    for token in sorted(STYLE_TOKENS, key=len, reverse=True):
+        if token in low:
             style = token.title()
             working = re.sub(re.escape(token), " ", working, flags=re.IGNORECASE)
             break
+    if not style:
+        for word in re.findall(r"\b([A-Za-z]{2,})\b", working):
+            uw = word.upper()
+            if uw in ("JERK", "TRAP", "RAGE", "DRILL", "PHONK"):
+                style = uw.title()
+                working = re.sub(rf"\b{re.escape(word)}\b", " ", working, flags=re.IGNORECASE)
+                break
 
     title = re.sub(r"\s+", " ", working).strip(" -_|")
+    if not title:
+        title = strip_handles(stem) or "Untitled"
+
     return {
-        "title": title or stem.strip(),
-        "style": style or "Unknown",
+        "title": title,
+        "style": style or "UNKNOWN",
         "bpm": str(bpm) if bpm else "",
         "key": key or "",
+        "collab": "",
     }
 
 
-def get_mp3_edit_keyboard():
+def channel_tag_display():
+    ch = (PUBLISH_CHANNEL or "@wutshy").strip()
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    return ch.upper()
+
+
+def get_mp3_channel_line(meta):
+    """Одна строка как в референсе: @WUTSHY | #JERK | 169 | C#m"""
+    tag = channel_tag_display()
+    genre = (meta.get("style") or "").strip()
+    if not genre or genre.upper() == "UNKNOWN":
+        genre_h = "#UNKNOWN"
+    else:
+        genre_h = "#" + genre.replace(" ", "").upper()
+    bpm = (meta.get("bpm") or "").strip() or "?"
+    key = (meta.get("key") or "").strip() or "?"
+    return f"{tag} | {genre_h} | {bpm} | {key}"
+
+
+def build_mp3_channel_caption(meta):
+    """Текст подписи к аудио в канале (plain)."""
+    line = get_mp3_channel_line(meta)
+    collab = (meta.get("collab") or "").strip()
+    if not collab:
+        return line
+    col = collab if collab.startswith("@") else "@" + collab
+    return f"{line}\n\nКоллаборация: {channel_tag_display()} x {col}"
+
+
+def get_mp3_parse_keyboard():
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Изменить Title", callback_data="mp3_edit_title"),
-                InlineKeyboardButton("Изменить Style", callback_data="mp3_edit_style"),
+                InlineKeyboardButton("✏️ Редактировать вручную", callback_data="mp3_menu_edit"),
+                InlineKeyboardButton("📝 Ввести вручную", callback_data="mp3_manual_line"),
             ],
             [
-                InlineKeyboardButton("Изменить BPM", callback_data="mp3_edit_bpm"),
-                InlineKeyboardButton("Изменить Key", callback_data="mp3_edit_key"),
-            ],
-            [
-                InlineKeyboardButton("Опубликовать", callback_data="mp3_publish"),
-                InlineKeyboardButton("Отмена", callback_data="mp3_cancel"),
+                InlineKeyboardButton("🔄 Начать заново", callback_data="mp3_cancel"),
+                InlineKeyboardButton("➡️ Предпросмотр", callback_data="mp3_to_cover"),
             ],
         ]
     )
 
 
-def format_mp3_preview(meta):
-    return (
-        "Черновик публикации:\n"
-        f"Title: {meta.get('title', '')}\n"
-        f"Style: {meta.get('style', '')}\n"
-        f"BPM: {meta.get('bpm', '')}\n"
-        f"Key: {meta.get('key', '')}"
+def get_mp3_field_pick_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎵 Название", callback_data="mp3_edit_title"),
+                InlineKeyboardButton("🎚️ BPM", callback_data="mp3_edit_bpm"),
+            ],
+            [
+                InlineKeyboardButton("🎹 Ключ", callback_data="mp3_edit_key"),
+                InlineKeyboardButton("🎭 Жанр", callback_data="mp3_edit_style"),
+            ],
+            [InlineKeyboardButton("👥 Коллаборатор", callback_data="mp3_edit_collab")],
+            [InlineKeyboardButton("↩️ Назад", callback_data="mp3_back_parse")],
+        ]
     )
 
 
-def get_mp3_caption(meta):
-    """Подпись к посту в канале (HTML)."""
-    title = (meta.get("title") or "").strip()
-    style = (meta.get("style") or "").strip()
-    bpm = (meta.get("bpm") or "").strip()
-    key = (meta.get("key") or "").strip()
+def get_mp3_publish_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Опубликовать", callback_data="mp3_publish")],
+            [InlineKeyboardButton("🔄 Начать заново", callback_data="mp3_cancel")],
+        ]
+    )
+
+
+def get_mp3_skip_cover_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏩ Пропустить обложку", callback_data="mp3_skip_cover")]]
+    )
+
+
+def format_mp3_parse_message(meta):
+    """Экран «Найдено / Не найдены» как в референсе (HTML)."""
+    missing = []
+    if not (meta.get("bpm") or "").strip():
+        missing.append("BPM")
+    if not (meta.get("key") or "").strip():
+        missing.append("Ключ")
+    g = (meta.get("style") or "").strip()
+    if not g or g.upper() == "UNKNOWN":
+        missing.append("Жанр")
+
+    def fmt_val(v):
+        v = (v or "").strip()
+        if not v:
+            return "None"
+        return html.escape(v)
+
     lines = []
-    if title:
-        lines.append(f"<b>{html.escape(title)}</b>")
-    if style:
-        lines.append(f"🎧 {html.escape(style)}")
-    if bpm:
-        lines.append(f"⚡ {html.escape(bpm)} BPM")
-    if key:
-        lines.append(f"🎹 {html.escape(key)}")
-    return "\n".join(lines) if lines else "<b>Новый трек</b>"
+    if missing:
+        lines.append(f"⚠️ <b>Не найдены:</b> {', '.join(missing)}")
+    lines.append("")
+    lines.append("<b>Найдено:</b>")
+    lines.append(f"🎵 <b>Название:</b> {fmt_val(meta.get('title'))}")
+    lines.append(f"🎚️ <b>BPM:</b> {fmt_val(meta.get('bpm'))}")
+    lines.append(f"🎹 <b>Ключ:</b> {fmt_val(meta.get('key'))}")
+    lines.append(f"🎭 <b>Жанр:</b> {fmt_val(meta.get('style'))}")
+    if (meta.get("collab") or "").strip():
+        lines.append(f"👥 <b>Коллаб:</b> {fmt_val(meta.get('collab'))}")
+    lines.append("")
+    lines.append("Нажми «Редактировать вручную», чтобы исправить ошибки.")
+    return "\n".join(lines)
+
+
+MP3_FIELD_PROMPTS = {
+    "title": "🎵 Введи новое название трека:",
+    "bpm": "🎚️ Введи новое значение BPM:",
+    "key": "🎹 Введи новый музыкальный ключ (например: Em, D#m, C):",
+    "style": "🎭 Введи новый жанр (например: JERK, trap):",
+    "collab": (
+        "👥 Добавить коллаборатора\n\n"
+        "Напиши ник (можно с @ или без):\n"
+        "Пример: @WUTSHY_COLLAB или wutshy_collab"
+    ),
+    "manual_line": (
+        "📝 Отправь строку с данными, как в одном названии файла.\n"
+        "Пример: Tracy 169 BPM C#min JERK"
+    ),
+}
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -378,6 +483,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = await init_user(uid)
     
     await show_main_menu(update)
+    if can_publish_to_channel(update):
+        await update.message.reply_text(
+            "👋 Привет! Я бот для обработки MP3 файлов.\n\n"
+            "1) Вытащу из названия BPM, ключ и жанр.\n"
+            "2) Можно загрузить свою обложку или пропустить.\n"
+            "3) Покажу предпросмотр и опубликую в канал.\n\n"
+            "Отправь MP3 файл, чтобы начать! 🎵"
+        )
     
     # Если уведомления включены и это первое взаимодействие, отправляем сообщение о запуске
     if settings.get("notifications_enabled", False) and uid not in SHOWN_STARTUP_MESSAGE:
@@ -945,6 +1058,9 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_mp3_cover") and can_publish_to_channel(update):
+        await process_mp3_cover_photo(update, context)
+        return
     uid = update.effective_user.id
     logger.info(f"Processing photo for user {uid}")
     
@@ -1195,14 +1311,13 @@ def apply_id3_metadata(mp3_path, meta, cover_bytes=None, cover_mime=None):
     tags.save(mp3_path)
 
 
-async def show_mp3_preview(update_or_query, context):
+async def show_mp3_metadata_screen(update_or_query, context, keyboard=None):
     meta = context.user_data.get("mp3_draft_meta", {})
-    text = format_mp3_preview(meta)
-    keyboard = get_mp3_edit_keyboard()
-    # CallbackQuery имеет edit_message_text; у Update — нет (используем reply или правку по id)
+    text = format_mp3_parse_message(meta)
+    kb = keyboard or get_mp3_parse_keyboard()
     cq = getattr(update_or_query, "callback_query", None)
     if cq and cq.message:
-        await cq.message.edit_text(text=text, reply_markup=keyboard)
+        await cq.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
         return
     msg = getattr(update_or_query, "message", None) or getattr(update_or_query, "effective_message", None)
     preview_id = context.user_data.get("mp3_preview_message_id")
@@ -1213,15 +1328,72 @@ async def show_mp3_preview(update_or_query, context):
                 chat_id=chat_id,
                 message_id=preview_id,
                 text=text,
-                reply_markup=keyboard,
+                reply_markup=kb,
+                parse_mode="HTML",
             )
             return
         except Exception:
             pass
     if msg:
-        sent = await msg.reply_text(text, reply_markup=keyboard)
+        sent = await msg.reply_text(text, reply_markup=kb, parse_mode="HTML")
         context.user_data["mp3_preview_message_id"] = sent.message_id
         context.user_data["mp3_preview_chat_id"] = sent.chat_id
+
+
+async def send_mp3_audio_preview(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, from_cover_upload: bool = False
+):
+    """Сообщение про обложку + аудио с подписью как @WUTSHY | #... и кнопки."""
+    draft_path = context.user_data.get("mp3_draft_path", "")
+    meta = context.user_data.get("mp3_draft_meta") or {}
+    if not draft_path or not os.path.exists(draft_path):
+        await update.effective_message.reply_text("Черновик MP3 не найден. Загрузи файл снова.")
+        return
+    custom = context.user_data.get("mp3_custom_cover_bytes")
+    custom_mime = context.user_data.get("mp3_custom_cover_mime") or "image/jpeg"
+    cover_bytes, cover_mime = await fetch_channel_avatar_bytes(context.bot)
+    if custom:
+        cover_bytes, cover_mime = custom, custom_mime
+        if not from_cover_upload:
+            await update.effective_message.reply_text("✅ Обложка загружена!")
+    else:
+        await update.effective_message.reply_text("⏩ Обложка пропущена, переходим дальше...")
+    apply_id3_metadata(draft_path, meta, cover_bytes=cover_bytes, cover_mime=cover_mime)
+    caption = build_mp3_channel_caption(meta)
+    performer = channel_tag_display().lstrip("@")
+    title = (meta.get("title") or "Track").strip()[:64]
+    try:
+        with open(draft_path, "rb") as audio_file:
+            sent = await context.bot.send_audio(
+                chat_id=update.effective_chat.id,
+                audio=audio_file,
+                caption=caption,
+                title=title,
+                performer=performer,
+                reply_markup=get_mp3_publish_keyboard(),
+            )
+        context.user_data["mp3_phase"] = "audio_preview"
+        context.user_data["mp3_audio_message_id"] = sent.message_id
+    except Exception as err:
+        record_error("mp3_audio_preview_failed", err)
+        await update.effective_message.reply_text("Не удалось отправить предпросмотр. Попробуй ещё раз.")
+
+
+async def process_mp3_cover_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    photo_file = await update.message.photo[-1].get_file()
+    path = f"cover_{uid}_{os.getpid()}.jpg"
+    await photo_file.download_to_drive(path)
+    with open(path, "rb") as f:
+        context.user_data["mp3_custom_cover_bytes"] = f.read()
+    context.user_data["mp3_custom_cover_mime"] = "image/jpeg"
+    context.user_data["awaiting_mp3_cover"] = False
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    await update.message.reply_text("✅ Обложка загружена!")
+    await send_mp3_audio_preview(update, context, from_cover_upload=True)
 
 
 async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1243,9 +1415,31 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["mp3_draft_path"] = draft_name
     context.user_data["mp3_draft_meta"] = parse_audio_filename(file_name)
     context.user_data["awaiting_mp3_field"] = None
+    context.user_data["mp3_phase"] = "parse"
+    context.user_data.pop("mp3_custom_cover_bytes", None)
+    context.user_data.pop("mp3_custom_cover_mime", None)
     context.user_data.pop("mp3_preview_message_id", None)
     context.user_data.pop("mp3_preview_chat_id", None)
-    await show_mp3_preview(update, context)
+    context.user_data.pop("mp3_audio_message_id", None)
+    await show_mp3_metadata_screen(update, context)
+
+
+async def _mp3_cleanup_draft(context):
+    draft_path = context.user_data.pop("mp3_draft_path", "")
+    context.user_data.pop("mp3_draft_meta", None)
+    context.user_data.pop("awaiting_mp3_field", None)
+    context.user_data.pop("awaiting_mp3_cover", None)
+    context.user_data.pop("mp3_preview_message_id", None)
+    context.user_data.pop("mp3_preview_chat_id", None)
+    context.user_data.pop("mp3_audio_message_id", None)
+    context.user_data.pop("mp3_custom_cover_bytes", None)
+    context.user_data.pop("mp3_custom_cover_mime", None)
+    context.user_data.pop("mp3_phase", None)
+    if draft_path and os.path.exists(draft_path):
+        try:
+            os.remove(draft_path)
+        except OSError:
+            record_error("mp3_draft_cleanup_failed", draft_path)
 
 
 async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1257,27 +1451,65 @@ async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return None
     data = query.data
 
+    async def safe_edit_cancel_note():
+        try:
+            if query.message and query.message.audio:
+                await query.edit_message_caption(caption="Отменено. Отправь MP3 снова.")
+            else:
+                await query.edit_message_text("Начни заново: отправь MP3.")
+        except Exception:
+            await query.message.reply_text("Начни заново: отправь MP3.")
+
+    if data == "mp3_menu_edit":
+        await query.answer()
+        meta = context.user_data.get("mp3_draft_meta", {})
+        text = format_mp3_parse_message(meta)
+        await query.message.edit_text(
+            text=text, reply_markup=get_mp3_field_pick_keyboard(), parse_mode="HTML"
+        )
+        return None
+
+    if data == "mp3_back_parse":
+        await query.answer()
+        await show_mp3_metadata_screen(update, context, keyboard=get_mp3_parse_keyboard())
+        return None
+
+    if data == "mp3_manual_line":
+        await query.answer()
+        context.user_data["awaiting_mp3_field"] = "manual_line"
+        await query.message.reply_text(MP3_FIELD_PROMPTS["manual_line"])
+        return None
+
+    if data == "mp3_to_cover":
+        await query.answer()
+        context.user_data["awaiting_mp3_cover"] = True
+        await query.message.reply_text(
+            "Отправь фото обложки (квадрат лучше) или нажми «Пропустить обложку».",
+            reply_markup=get_mp3_skip_cover_keyboard(),
+        )
+        return None
+
+    if data == "mp3_skip_cover":
+        await query.answer()
+        context.user_data["awaiting_mp3_cover"] = False
+        context.user_data.pop("mp3_custom_cover_bytes", None)
+        context.user_data.pop("mp3_custom_cover_mime", None)
+        await send_mp3_audio_preview(update, context)
+        return None
+
     if data.startswith("mp3_edit_"):
         await query.answer()
         field = data.replace("mp3_edit_", "", 1)
-        field_map = {"title": "Title", "style": "Style", "bpm": "BPM", "key": "Key"}
+        if field not in ("title", "style", "bpm", "key", "collab"):
+            return None
         context.user_data["awaiting_mp3_field"] = field
-        await query.message.reply_text(f"Введи новое значение для {field_map.get(field, field)}:")
+        await query.message.reply_text(MP3_FIELD_PROMPTS.get(field, "Введи значение:"))
         return None
 
     if data == "mp3_cancel":
         await query.answer()
-        draft_path = context.user_data.pop("mp3_draft_path", "")
-        context.user_data.pop("mp3_draft_meta", None)
-        context.user_data.pop("awaiting_mp3_field", None)
-        context.user_data.pop("mp3_preview_message_id", None)
-        context.user_data.pop("mp3_preview_chat_id", None)
-        if draft_path and os.path.exists(draft_path):
-            try:
-                os.remove(draft_path)
-            except OSError:
-                record_error("mp3_draft_cleanup_failed", draft_path)
-        await query.edit_message_text("Черновик отменен.")
+        await _mp3_cleanup_draft(context)
+        await safe_edit_cancel_note()
         return None
 
     if data == "mp3_publish":
@@ -1287,32 +1519,51 @@ async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("Черновик не найден", show_alert=True)
             return None
         await query.answer()
-        cover_bytes, cover_mime = await fetch_channel_avatar_bytes(context.bot)
+        custom = context.user_data.get("mp3_custom_cover_bytes")
+        custom_mime = context.user_data.get("mp3_custom_cover_mime") or "image/jpeg"
+        if custom:
+            cover_bytes, cover_mime = custom, custom_mime
+        else:
+            cover_bytes, cover_mime = await fetch_channel_avatar_bytes(context.bot)
         apply_id3_metadata(draft_path, meta, cover_bytes=cover_bytes, cover_mime=cover_mime)
-        caption = get_mp3_caption(meta)
+        caption = build_mp3_channel_caption(meta)
         try:
             with open(draft_path, "rb") as audio_file:
                 await context.bot.send_audio(
                     chat_id=PUBLISH_CHANNEL,
                     audio=audio_file,
                     caption=caption,
-                    parse_mode="HTML",
                 )
-            await query.edit_message_text("Опубликовано в канал.")
+            try:
+                if query.message and query.message.audio:
+                    await query.edit_message_caption(caption="✅ Опубликовано в канал.")
+                else:
+                    await query.edit_message_text("✅ Опубликовано в канал.")
+            except Exception:
+                await query.message.reply_text("✅ Опубликовано в канал.")
         except Exception as err:
             record_error("mp3_publish_failed", err)
-            await query.edit_message_text("Не удалось опубликовать. Проверь права бота в канале.")
+            try:
+                await query.message.reply_text(
+                    "Не удалось опубликовать. Проверь, что бот — админ канала с правом постить."
+                )
+            except Exception:
+                pass
         finally:
-            context.user_data.pop("mp3_draft_meta", None)
-            context.user_data.pop("awaiting_mp3_field", None)
-            context.user_data.pop("mp3_draft_path", None)
-            context.user_data.pop("mp3_preview_message_id", None)
-            context.user_data.pop("mp3_preview_chat_id", None)
             if os.path.exists(draft_path):
                 try:
                     os.remove(draft_path)
                 except OSError:
                     record_error("mp3_draft_cleanup_failed", draft_path)
+            context.user_data.pop("mp3_draft_meta", None)
+            context.user_data.pop("awaiting_mp3_field", None)
+            context.user_data.pop("mp3_draft_path", None)
+            context.user_data.pop("mp3_preview_message_id", None)
+            context.user_data.pop("mp3_preview_chat_id", None)
+            context.user_data.pop("mp3_audio_message_id", None)
+            context.user_data.pop("mp3_custom_cover_bytes", None)
+            context.user_data.pop("mp3_custom_cover_mime", None)
+            context.user_data.pop("mp3_phase", None)
         return None
 
     return None
@@ -1327,17 +1578,50 @@ async def handle_mp3_edit_text(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["awaiting_mp3_field"] = None
         return False
     value = update.message.text.strip()
+
+    if field == "manual_line":
+        parsed = parse_audio_filename(value + ".mp3")
+        parsed["collab"] = meta.get("collab", "")
+        context.user_data["mp3_draft_meta"] = parsed
+        context.user_data["awaiting_mp3_field"] = None
+        await update.message.reply_text("✅ Строка разобрана заново.")
+        await show_mp3_metadata_screen(update, context)
+        return True
+
     if field == "bpm":
         if not value.isdigit() or not (1 <= int(value) <= 300):
             await update.message.reply_text("BPM должен быть целым числом от 1 до 300.")
             return True
     if field == "key" and value:
         value = normalize_key(value)
+    if field == "style" and not value:
+        value = "UNKNOWN"
+    if field == "collab":
+        col = value if value.startswith("@") else (f"@{value}" if value else "")
+        meta["collab"] = col
+        context.user_data["mp3_draft_meta"] = meta
+        context.user_data["awaiting_mp3_field"] = None
+        if col:
+            await update.message.reply_text(
+                f"✅ Коллаборатор {col} добавлен!\n\n"
+                f"Коллаборация: {channel_tag_display()} x {col}"
+            )
+        else:
+            await update.message.reply_text("✅ Коллаборатор убран.")
+        await show_mp3_metadata_screen(update, context)
+        return True
+
     meta[field] = value
     context.user_data["mp3_draft_meta"] = meta
     context.user_data["awaiting_mp3_field"] = None
-    await update.message.reply_text("Поле обновлено.")
-    await show_mp3_preview(update, context)
+    done = {
+        "title": "✅ Название обновлено!",
+        "bpm": "✅ BPM обновлено!",
+        "key": "✅ Ключ обновлен!",
+        "style": "✅ Жанр обновлен!",
+    }.get(field, "✅ Готово.")
+    await update.message.reply_text(done)
+    await show_mp3_metadata_screen(update, context)
     return True
 
 
@@ -1511,9 +1795,11 @@ async def handle_photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         SHOWN_STARTUP_MESSAGE.add(uid)
         await update.message.reply_text("🤖 Бот запущен и готов к работе!")
     
-    # Обрабатываем фото
+    was_awaiting_mp3_cover = context.user_data.get("awaiting_mp3_cover")
     await process_photo(update, context)
-    
+    if was_awaiting_mp3_cover and not context.user_data.get("awaiting_mp3_cover"):
+        return MAIN_MENU
+
     await update.message.reply_text(
         "🎛 Фото готово! Выбери что дальше:",
         reply_markup=get_main_menu_for(update)
