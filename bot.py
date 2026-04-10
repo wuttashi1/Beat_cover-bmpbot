@@ -1754,6 +1754,9 @@ def main():
     )
 
     app.add_handler(conv_handler)
+    # Handle MP3 inline callbacks even if conversation state was lost
+    # (e.g. bot restart while user still clicks old inline buttons).
+    app.add_handler(_mp3_query_handler())
     app.add_handler(CommandHandler("savepreset", savepreset_command))
     app.add_handler(CommandHandler("save_to_shared", save_to_shared_command))
     app.add_handler(CommandHandler("mypresets", mypresets_command))
