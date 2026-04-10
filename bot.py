@@ -1,3 +1,4 @@
+import html
 import logging
 import json
 import os
@@ -21,14 +22,23 @@ from menu_manager import (
     VEVO_SETTINGS, EXPLICIT_SETTINGS, CUSTOM_INPUT,
     VEVO_WM_SIZE, EXPLICIT_BLUR, EXPLICIT_FG_SIZE,
     EXPLICIT_QUALITY, EXPLICIT_FORMAT, NOTIFICATIONS_TOGGLE,
-    BPM_INPUT, BPM_STRUCTURE,
+    BPM_INPUT, BPM_STRUCTURE, ADMIN_PANEL,
     get_main_keyboard, get_style_keyboard, get_settings_style_keyboard,
     get_vevo_wm_keyboard, get_explicit_menu_keyboard, get_explicit_wm_keyboard,
     get_blur_keyboard, get_fg_size_keyboard, get_quality_keyboard,
     get_format_keyboard, get_back_keyboard, get_notifications_keyboard,
-    get_bpm_structure_keyboard
+    get_bpm_structure_keyboard,
+    get_admin_panel_keyboard,
 )
-from database import get_user_settings, update_user_setting, get_all_users
+from database import (
+    get_user_settings,
+    update_user_setting,
+    get_all_users,
+    add_channel_publisher,
+    remove_channel_publisher,
+    list_channel_publishers,
+    is_channel_publisher,
+)
 from styles import style_vevo, style_explicit
 
 logging.basicConfig(level=logging.INFO)
@@ -202,6 +212,16 @@ def is_admin_user(update: Update):
     return user.id == ADMIN_USER_ID
 
 
+def can_publish_to_channel(update: Update):
+    """Публикация в канал: админ или user_id из списка channel_publishers."""
+    user = update.effective_user
+    if not user:
+        return False
+    if is_admin_user(update):
+        return True
+    return is_channel_publisher(user.id)
+
+
 def get_main_menu_for(update: Update):
     return get_main_keyboard(is_admin=is_admin_user(update))
 
@@ -285,10 +305,21 @@ def format_mp3_preview(meta):
 
 
 def get_mp3_caption(meta):
-    fields = [meta.get("title", ""), meta.get("style", ""), meta.get("bpm", ""), meta.get("key", "")]
-    labels = ["Title", "Style", "BPM", "Key"]
-    parts = [f"{label}: {value}" for label, value in zip(labels, fields) if value]
-    return " | ".join(parts) if parts else "Новый релиз"
+    """Подпись к посту в канале (HTML)."""
+    title = (meta.get("title") or "").strip()
+    style = (meta.get("style") or "").strip()
+    bpm = (meta.get("bpm") or "").strip()
+    key = (meta.get("key") or "").strip()
+    lines = []
+    if title:
+        lines.append(f"<b>{html.escape(title)}</b>")
+    if style:
+        lines.append(f"🎧 {html.escape(style)}")
+    if bpm:
+        lines.append(f"⚡ {html.escape(bpm)} BPM")
+    if key:
+        lines.append(f"🎹 {html.escape(key)}")
+    return "\n".join(lines) if lines else "<b>Новый трек</b>"
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -404,14 +435,99 @@ async def main_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin_user(update):
             await update.message.reply_text("Доступ запрещен.")
             return MAIN_MENU
-        context.user_data["awaiting_admin_audio"] = True
+        context.user_data.pop("awaiting_publisher_add", None)
+        context.user_data.pop("awaiting_publisher_remove", None)
         await update.message.reply_text(
-            "Админ-панель MP3 активна.\nОтправь MP3-файл для предпросмотра и публикации в канал."
+            "Управление, кто может публиковать биты в канал (кроме тебя).\n"
+            "Добавь Telegram user_id пользователя — он сможет кидать MP3 и жать «Опубликовать».",
+            reply_markup=get_admin_panel_keyboard(),
         )
-        return MAIN_MENU
+        return ADMIN_PANEL
 
     logger.warning(f"Unknown main menu input: {text}")
     return MAIN_MENU
+
+
+async def admin_panel_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update):
+        await update.message.reply_text("Доступ запрещен.", reply_markup=get_main_menu_for(update))
+        return MAIN_MENU
+    text = (update.message.text or "").strip()
+
+    if text == "⬅️ Назад в меню":
+        context.user_data.pop("awaiting_publisher_add", None)
+        context.user_data.pop("awaiting_publisher_remove", None)
+        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_menu_for(update))
+        return MAIN_MENU
+
+    if context.user_data.get("awaiting_publisher_add"):
+        context.user_data["awaiting_publisher_add"] = False
+        try:
+            new_id = int(text)
+            if new_id <= 0:
+                raise ValueError
+            add_channel_publisher(new_id)
+            await update.message.reply_text(
+                f"Добавлен публикатор: <code>{new_id}</code>",
+                reply_markup=get_admin_panel_keyboard(),
+                parse_mode="HTML",
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "Нужен числовой Telegram user_id (целое число). Пример: 123456789",
+                reply_markup=get_admin_panel_keyboard(),
+            )
+        return ADMIN_PANEL
+
+    if context.user_data.get("awaiting_publisher_remove"):
+        context.user_data["awaiting_publisher_remove"] = False
+        try:
+            rid = int(text)
+            remove_channel_publisher(rid)
+            await update.message.reply_text(
+                f"Удалён из публикаторов: <code>{rid}</code>",
+                reply_markup=get_admin_panel_keyboard(),
+                parse_mode="HTML",
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "Нужен числовой user_id.",
+                reply_markup=get_admin_panel_keyboard(),
+            )
+        return ADMIN_PANEL
+
+    if text == "➕ Добавить ID публикатора":
+        context.user_data["awaiting_publisher_add"] = True
+        await update.message.reply_text(
+            "Отправь числовой Telegram user_id пользователя.",
+            reply_markup=get_admin_panel_keyboard(),
+        )
+        return ADMIN_PANEL
+
+    if text == "📋 Список публикаторов":
+        users = list_channel_publishers()
+        if not users:
+            await update.message.reply_text(
+                "Список пуст. Публиковать в канал могут только добавленные сюда ID (и ты как админ).",
+                reply_markup=get_admin_panel_keyboard(),
+            )
+        else:
+            await update.message.reply_text(
+                "Публикаторы (user_id):\n" + "\n".join(str(u) for u in users),
+                reply_markup=get_admin_panel_keyboard(),
+            )
+        return ADMIN_PANEL
+
+    if text == "➖ Удалить ID публикатора":
+        context.user_data["awaiting_publisher_remove"] = True
+        await update.message.reply_text(
+            "Отправь user_id для удаления из списка.",
+            reply_markup=get_admin_panel_keyboard(),
+        )
+        return ADMIN_PANEL
+
+    await update.message.reply_text("Выбери действие на клавиатуре.", reply_markup=get_admin_panel_keyboard())
+    return ADMIN_PANEL
 
 
 async def style_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1109,13 +1225,13 @@ async def show_mp3_preview(update_or_query, context):
 
 
 async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update):
+    if not can_publish_to_channel(update):
+        await update.message.reply_text(
+            "Нет доступа к публикации в канал. Попроси админа добавить твой user_id в список публикаторов."
+        )
         return
     audio = update.message.audio
     if not audio:
-        return
-    if not context.user_data.get("awaiting_admin_audio"):
-        await update.message.reply_text("Открой админ-панель кнопкой '🛠 Админ панель', потом отправь MP3.")
         return
     file_name = audio.file_name or "track.mp3"
     if not file_name.lower().endswith(".mp3"):
@@ -1126,7 +1242,6 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await telegram_file.download_to_drive(draft_name)
     context.user_data["mp3_draft_path"] = draft_name
     context.user_data["mp3_draft_meta"] = parse_audio_filename(file_name)
-    context.user_data["awaiting_admin_audio"] = False
     context.user_data["awaiting_mp3_field"] = None
     context.user_data.pop("mp3_preview_message_id", None)
     context.user_data.pop("mp3_preview_chat_id", None)
@@ -1137,8 +1252,8 @@ async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     if not query or not query.data.startswith("mp3_"):
         return None
-    if not is_admin_user(update):
-        await query.answer("Недостаточно прав", show_alert=True)
+    if not can_publish_to_channel(update):
+        await query.answer("Нет доступа к публикации в канал.", show_alert=True)
         return None
     data = query.data
 
@@ -1177,7 +1292,12 @@ async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         caption = get_mp3_caption(meta)
         try:
             with open(draft_path, "rb") as audio_file:
-                await context.bot.send_audio(chat_id=PUBLISH_CHANNEL, audio=audio_file, caption=caption)
+                await context.bot.send_audio(
+                    chat_id=PUBLISH_CHANNEL,
+                    audio=audio_file,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
             await query.edit_message_text("Опубликовано в канал.")
         except Exception as err:
             record_error("mp3_publish_failed", err)
@@ -1330,6 +1450,12 @@ def main():
             BPM_STRUCTURE: [
                 _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_structure),
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
+            ],
+            ADMIN_PANEL: [
+                _mp3_query_handler(),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_choice),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],

@@ -6,6 +6,7 @@ VEVO_SETTINGS, EXPLICIT_SETTINGS, CUSTOM_INPUT = 3, 4, 5
 VEVO_WM_SIZE, EXPLICIT_WM_SIZE, EXPLICIT_BLUR = 6, 7, 8
 EXPLICIT_FG_SIZE, EXPLICIT_QUALITY, EXPLICIT_FORMAT = 9, 10, 11
 NOTIFICATIONS_TOGGLE, BPM_INPUT, BPM_STRUCTURE = 12, 13, 14
+ADMIN_PANEL = 15
 
 
 def get_main_keyboard(is_admin=False):
@@ -103,4 +104,14 @@ def get_bpm_structure_keyboard():
         [["🧩 Структура по умолчанию", "✍️ Своя структура"],
          ["⬅️ Назад"]],
         resize_keyboard=True
+    )
+
+
+def get_admin_panel_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["➕ Добавить ID публикатора", "📋 Список публикаторов"],
+            ["➖ Удалить ID публикатора", "⬅️ Назад в меню"],
+        ],
+        resize_keyboard=True,
     )

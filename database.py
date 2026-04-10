@@ -64,7 +64,39 @@ def migrate_database():
         db.commit()
 
 
+def migrate_channel_publishers():
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channel_publishers (
+            user_id INTEGER PRIMARY KEY
+        )
+        """
+    )
+    db.commit()
+
+
 migrate_database()
+migrate_channel_publishers()
+
+
+def add_channel_publisher(user_id: int):
+    cur.execute("INSERT OR IGNORE INTO channel_publishers(user_id) VALUES (?)", (user_id,))
+    db.commit()
+
+
+def remove_channel_publisher(user_id: int):
+    cur.execute("DELETE FROM channel_publishers WHERE user_id=?", (user_id,))
+    db.commit()
+
+
+def list_channel_publishers():
+    cur.execute("SELECT user_id FROM channel_publishers ORDER BY user_id")
+    return [row[0] for row in cur.fetchall()]
+
+
+def is_channel_publisher(user_id: int) -> bool:
+    cur.execute("SELECT 1 FROM channel_publishers WHERE user_id=?", (user_id,))
+    return cur.fetchone() is not None
 
 
 def get_user_settings(uid):
