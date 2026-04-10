@@ -1083,10 +1083,29 @@ async def show_mp3_preview(update_or_query, context):
     meta = context.user_data.get("mp3_draft_meta", {})
     text = format_mp3_preview(meta)
     keyboard = get_mp3_edit_keyboard()
-    if hasattr(update_or_query, "edit_message_text"):
-        await update_or_query.edit_message_text(text=text, reply_markup=keyboard)
-    else:
-        await update_or_query.message.reply_text(text, reply_markup=keyboard)
+    # CallbackQuery имеет edit_message_text; у Update — нет (используем reply или правку по id)
+    cq = getattr(update_or_query, "callback_query", None)
+    if cq and cq.message:
+        await cq.message.edit_text(text=text, reply_markup=keyboard)
+        return
+    msg = getattr(update_or_query, "message", None) or getattr(update_or_query, "effective_message", None)
+    preview_id = context.user_data.get("mp3_preview_message_id")
+    chat_id = context.user_data.get("mp3_preview_chat_id")
+    if preview_id and chat_id and msg and getattr(msg, "chat_id", None) == chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=preview_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:
+            pass
+    if msg:
+        sent = await msg.reply_text(text, reply_markup=keyboard)
+        context.user_data["mp3_preview_message_id"] = sent.message_id
+        context.user_data["mp3_preview_chat_id"] = sent.chat_id
 
 
 async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1109,44 +1128,50 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["mp3_draft_meta"] = parse_audio_filename(file_name)
     context.user_data["awaiting_admin_audio"] = False
     context.user_data["awaiting_mp3_field"] = None
+    context.user_data.pop("mp3_preview_message_id", None)
+    context.user_data.pop("mp3_preview_chat_id", None)
     await show_mp3_preview(update, context)
 
 
 async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data.startswith("mp3_"):
-        return
-    await query.answer()
+        return None
     if not is_admin_user(update):
         await query.answer("Недостаточно прав", show_alert=True)
-        return
+        return None
     data = query.data
 
     if data.startswith("mp3_edit_"):
+        await query.answer()
         field = data.replace("mp3_edit_", "", 1)
         field_map = {"title": "Title", "style": "Style", "bpm": "BPM", "key": "Key"}
         context.user_data["awaiting_mp3_field"] = field
         await query.message.reply_text(f"Введи новое значение для {field_map.get(field, field)}:")
-        return
+        return None
 
     if data == "mp3_cancel":
+        await query.answer()
         draft_path = context.user_data.pop("mp3_draft_path", "")
         context.user_data.pop("mp3_draft_meta", None)
         context.user_data.pop("awaiting_mp3_field", None)
+        context.user_data.pop("mp3_preview_message_id", None)
+        context.user_data.pop("mp3_preview_chat_id", None)
         if draft_path and os.path.exists(draft_path):
             try:
                 os.remove(draft_path)
             except OSError:
                 record_error("mp3_draft_cleanup_failed", draft_path)
         await query.edit_message_text("Черновик отменен.")
-        return
+        return None
 
     if data == "mp3_publish":
         draft_path = context.user_data.get("mp3_draft_path", "")
         meta = context.user_data.get("mp3_draft_meta")
         if not draft_path or not meta or not os.path.exists(draft_path):
             await query.answer("Черновик не найден", show_alert=True)
-            return
+            return None
+        await query.answer()
         cover_bytes, cover_mime = await fetch_channel_avatar_bytes(context.bot)
         apply_id3_metadata(draft_path, meta, cover_bytes=cover_bytes, cover_mime=cover_mime)
         caption = get_mp3_caption(meta)
@@ -1161,11 +1186,16 @@ async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop("mp3_draft_meta", None)
             context.user_data.pop("awaiting_mp3_field", None)
             context.user_data.pop("mp3_draft_path", None)
+            context.user_data.pop("mp3_preview_message_id", None)
+            context.user_data.pop("mp3_preview_chat_id", None)
             if os.path.exists(draft_path):
                 try:
                     os.remove(draft_path)
                 except OSError:
                     record_error("mp3_draft_cleanup_failed", draft_path)
+        return None
+
+    return None
 
 
 async def handle_mp3_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1189,6 +1219,10 @@ async def handle_mp3_edit_text(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("Поле обновлено.")
     await show_mp3_preview(update, context)
     return True
+
+
+def _mp3_query_handler():
+    return CallbackQueryHandler(handle_mp3_callback, pattern=r"^mp3_")
 
 
 # -------------------- MAIN --------------------
@@ -1216,71 +1250,85 @@ def main():
         ],
         states={
             MAIN_MENU: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_choice),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             STYLE_CHOICE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, style_choice),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             SETTINGS_CHOICE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_choice),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             VEVO_SETTINGS: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, vevo_settings),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_SETTINGS: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_settings),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             VEVO_WM_SIZE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_wm_size),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_BLUR: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_blur),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_FG_SIZE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_fg_size),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_QUALITY: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_quality),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_FORMAT: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_format),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             CUSTOM_INPUT: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             NOTIFICATIONS_TOGGLE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, notifications_toggle),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             BPM_INPUT: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_input),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
             ],
             BPM_STRUCTURE: [
+                _mp3_query_handler(),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_structure),
                 MessageHandler(filters.PHOTO, process_photo),
                 MessageHandler(filters.AUDIO, process_audio_file),
@@ -1288,6 +1336,7 @@ def main():
         },
         fallbacks=[
             MessageHandler(filters.Command("start"), start),
+            _mp3_query_handler(),
         ],
     )
 
@@ -1299,7 +1348,6 @@ def main():
     app.add_handler(CommandHandler("loadpreset", loadpreset_command))
     app.add_handler(CommandHandler("deletepreset", deletepreset_command))
     app.add_handler(CommandHandler("loadshared", loadshared_command))
-    app.add_handler(CallbackQueryHandler(handle_mp3_callback, pattern=r"^mp3_"))
     app.add_error_handler(global_error_handler)
 
     app.run_polling()
