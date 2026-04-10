@@ -8,13 +8,15 @@ EXPLICIT_FG_SIZE, EXPLICIT_QUALITY, EXPLICIT_FORMAT = 9, 10, 11
 NOTIFICATIONS_TOGGLE, BPM_INPUT, BPM_STRUCTURE = 12, 13, 14
 
 
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        [["🎨 Выбор стиля", "⚙️ Настройка стиля"],
-         ["🔢 BPM таймкоды", "🔔 Уведомления о перезапуске"],
-         ["🗂 BPM пресеты", "🛒 BPM магазин"]],
-        resize_keyboard=True
-    )
+def get_main_keyboard(is_admin=False):
+    rows = [
+        ["🎨 Выбор стиля", "⚙️ Настройка стиля"],
+        ["🔢 BPM таймкоды", "🔔 Уведомления о перезапуске"],
+        ["🗂 BPM пресеты", "🛒 BPM магазин"],
+    ]
+    if is_admin:
+        rows.append(["🛠 Админ панель"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def get_style_keyboard():

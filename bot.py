@@ -1,11 +1,14 @@
 import logging
 import json
 import os
+import re
 from dotenv import load_dotenv
+from mutagen.id3 import APIC, ID3, TBPM, TCON, TIT2, TKEY
 from PIL import Image
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     MessageHandler,
     CommandHandler,
     filters,
@@ -33,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_USER_ID_RAW = os.getenv("ADMIN_USER_ID")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").lstrip("@").lower()
+PUBLISH_CHANNEL = os.getenv("PUBLISH_CHANNEL")
 
 QUALITY_MAP = {
     "draft": 6,
@@ -52,6 +58,25 @@ DEFAULT_BPM_STRUCTURE = [
     ("Chorus", 16),
     ("Outro", 8),
 ]
+STYLE_TOKENS = [
+    "new jazz",
+    "jerk",
+    "trap",
+    "rage",
+    "drill",
+    "pluggnb",
+    "boom bap",
+    "phonk",
+    "hyperpop",
+]
+KEY_PATTERN = re.compile(r"\b([A-G](?:#|b)?(?:m|maj|min)?)\b", re.IGNORECASE)
+BPM_PATTERN = re.compile(r"\b(\d{2,3})\s*BPM\b", re.IGNORECASE)
+FALLBACK_BPM_PATTERN = re.compile(r"\b(\d{2,3})\b")
+
+try:
+    ADMIN_USER_ID = int(ADMIN_USER_ID_RAW) if ADMIN_USER_ID_RAW else None
+except ValueError:
+    ADMIN_USER_ID = None
 
 
 def format_time(seconds):
@@ -167,6 +192,105 @@ def record_error(error_type, details=None):
     save_json(ERROR_STATS_FILE, stats)
 
 
+def is_admin_user(update: Update):
+    user = update.effective_user
+    if not user or ADMIN_USER_ID is None:
+        return False
+    username = (user.username or "").lower()
+    if ADMIN_USERNAME and username != ADMIN_USERNAME:
+        return False
+    return user.id == ADMIN_USER_ID
+
+
+def get_main_menu_for(update: Update):
+    return get_main_keyboard(is_admin=is_admin_user(update))
+
+
+def normalize_key(raw_key):
+    key = raw_key.replace("♯", "#").strip()
+    if key.lower().endswith("min"):
+        key = f"{key[:-3]}m"
+    if key.lower().endswith("maj"):
+        key = key[:-3]
+    if len(key) == 1:
+        return key.upper()
+    return f"{key[0].upper()}{key[1:]}"
+
+
+def parse_audio_filename(file_name):
+    stem = os.path.splitext(file_name or "")[0]
+    working = stem
+
+    bpm_match = BPM_PATTERN.search(working)
+    bpm = int(bpm_match.group(1)) if bpm_match else None
+    if bpm_match:
+        working = BPM_PATTERN.sub(" ", working)
+    if bpm is None:
+        fallback = FALLBACK_BPM_PATTERN.search(working)
+        if fallback:
+            maybe_bpm = int(fallback.group(1))
+            if 60 <= maybe_bpm <= 220:
+                bpm = maybe_bpm
+                working = FALLBACK_BPM_PATTERN.sub(" ", working, count=1)
+
+    key_match = KEY_PATTERN.search(working)
+    key = normalize_key(key_match.group(1)) if key_match else ""
+    if key_match:
+        working = KEY_PATTERN.sub(" ", working, count=1)
+
+    style = ""
+    lowered = working.lower()
+    for token in STYLE_TOKENS:
+        if token in lowered:
+            style = token.title()
+            working = re.sub(re.escape(token), " ", working, flags=re.IGNORECASE)
+            break
+
+    title = re.sub(r"\s+", " ", working).strip(" -_|")
+    return {
+        "title": title or stem.strip(),
+        "style": style or "Unknown",
+        "bpm": str(bpm) if bpm else "",
+        "key": key or "",
+    }
+
+
+def get_mp3_edit_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Изменить Title", callback_data="mp3_edit_title"),
+                InlineKeyboardButton("Изменить Style", callback_data="mp3_edit_style"),
+            ],
+            [
+                InlineKeyboardButton("Изменить BPM", callback_data="mp3_edit_bpm"),
+                InlineKeyboardButton("Изменить Key", callback_data="mp3_edit_key"),
+            ],
+            [
+                InlineKeyboardButton("Опубликовать", callback_data="mp3_publish"),
+                InlineKeyboardButton("Отмена", callback_data="mp3_cancel"),
+            ],
+        ]
+    )
+
+
+def format_mp3_preview(meta):
+    return (
+        "Черновик публикации:\n"
+        f"Title: {meta.get('title', '')}\n"
+        f"Style: {meta.get('style', '')}\n"
+        f"BPM: {meta.get('bpm', '')}\n"
+        f"Key: {meta.get('key', '')}"
+    )
+
+
+def get_mp3_caption(meta):
+    fields = [meta.get("title", ""), meta.get("style", ""), meta.get("bpm", ""), meta.get("key", "")]
+    labels = ["Title", "Style", "BPM", "Key"]
+    parts = [f"{label}: {value}" for label, value in zip(labels, fields) if value]
+    return " | ".join(parts) if parts else "Новый релиз"
+
+
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     error_text = str(context.error)
     logger.exception("Unhandled exception: %s", error_text)
@@ -184,7 +308,7 @@ async def show_main_menu(update: Update):
     """Показывает главное меню"""
     await update.message.reply_text(
         "🎛 STUDIO BOT — главное меню",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_menu_for(update)
     )
 
 
@@ -276,6 +400,16 @@ async def main_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await presetshop_command(update, context)
         return MAIN_MENU
 
+    elif text == "🛠 Админ панель":
+        if not is_admin_user(update):
+            await update.message.reply_text("Доступ запрещен.")
+            return MAIN_MENU
+        context.user_data["awaiting_admin_audio"] = True
+        await update.message.reply_text(
+            "Админ-панель MP3 активна.\nОтправь MP3-файл для предпросмотра и публикации в канал."
+        )
+        return MAIN_MENU
+
     logger.warning(f"Unknown main menu input: {text}")
     return MAIN_MENU
 
@@ -287,16 +421,16 @@ async def style_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🎬 VEVO":
         update_user_setting(uid, "style", "vevo")
-        await update.message.reply_text("✅ Стиль VEVO активирован", reply_markup=get_main_keyboard())
+        await update.message.reply_text("✅ Стиль VEVO активирован", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     elif text == "🔞 EXPLICIT":
         update_user_setting(uid, "style", "explicit")
-        await update.message.reply_text("✅ Стиль EXPLICIT активирован", reply_markup=get_main_keyboard())
+        await update.message.reply_text("✅ Стиль EXPLICIT активирован", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     elif text == "⬅️ Назад":
-        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     logger.warning(f"Unknown style choice: {text}")
@@ -322,7 +456,7 @@ async def settings_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return EXPLICIT_SETTINGS
 
     elif text == "⬅️ Назад":
-        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     logger.warning(f"Unknown settings choice: {text}")
@@ -337,7 +471,7 @@ async def vevo_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["300", "450 (дефолт)", "500", "550"]:
         value = int(text.split()[0])
         update_user_setting(uid, "vevo_wm_size", value)
-        await update.message.reply_text(f"✅ Размер вотермарки: {value}px", reply_markup=get_main_keyboard())
+        await update.message.reply_text(f"✅ Размер вотермарки: {value}px", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     elif text == "✏️ Своё значение":
@@ -537,7 +671,7 @@ async def notifications_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
         update_user_setting(uid, "notifications_enabled", 1)
         await update.message.reply_text(
             "🔔 Уведомления ✅ включены",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_menu_for(update)
         )
         logger.info(f"User {uid} enabled notifications")
         return MAIN_MENU
@@ -546,13 +680,13 @@ async def notifications_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
         update_user_setting(uid, "notifications_enabled", 0)
         await update.message.reply_text(
             "🔔 Уведомления ❌ отключены",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_menu_for(update)
         )
         logger.info(f"User {uid} disabled notifications")
         return MAIN_MENU
 
     elif text == "⬅️ Назад":
-        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🎛 Главное меню", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
 
     logger.warning(f"Unknown notifications input: {text}")
@@ -571,7 +705,7 @@ async def custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif return_state == EXPLICIT_SETTINGS:
             await update.message.reply_text("⚙️ EXPLICIT — выбери параметр для настройки:", reply_markup=get_explicit_menu_keyboard())
         else:
-            await update.message.reply_text("🎛 STUDIO BOT — главное меню", reply_markup=get_main_keyboard())
+            await update.message.reply_text("🎛 STUDIO BOT — главное меню", reply_markup=get_main_menu_for(update))
         return return_state
 
     try:
@@ -584,7 +718,7 @@ async def custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Значение должно быть 10-550")
                 return CUSTOM_INPUT
             update_user_setting(uid, "vevo_wm_size", value)
-            await update.message.reply_text(f"✅ Размер вотермарки: {value}px", reply_markup=get_main_keyboard())
+            await update.message.reply_text(f"✅ Размер вотермарки: {value}px", reply_markup=get_main_menu_for(update))
             return MAIN_MENU
 
         elif input_type == "explicit_wm":
@@ -622,7 +756,7 @@ async def custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bpm_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "⬅️ Назад":
-        await update.message.reply_text("🎛 STUDIO BOT — главное меню", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🎛 STUDIO BOT — главное меню", reply_markup=get_main_menu_for(update))
         return MAIN_MENU
     try:
         bpm = int(text)
@@ -659,7 +793,7 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Таймкоды готовы\nBPM: {bpm}\n\n{timestamps}\n\n"
             "Сохранить: /savepreset\nВ общий доступ: /save_to_shared",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_menu_for(update)
         )
         return MAIN_MENU
 
@@ -681,7 +815,7 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Таймкоды готовы\nBPM: {bpm}\n\n{timestamps}\n\n"
                 "Сохранить: /savepreset\nВ общий доступ: /save_to_shared",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_main_menu_for(update)
             )
             return MAIN_MENU
         except (ValueError, TypeError):
@@ -880,7 +1014,7 @@ async def handle_preset_name_input(update: Update, context: ContextTypes.DEFAULT
     presets[name] = {"bpm": bpm, "structure": serialize_structure(structure)}
     save_presets(user_id, presets)
     context.user_data["awaiting_preset_name"] = False
-    await update.message.reply_text(f"✅ Пресет '{name}' сохранен.", reply_markup=get_main_keyboard())
+    await update.message.reply_text(f"✅ Пресет '{name}' сохранен.", reply_markup=get_main_menu_for(update))
     return MAIN_MENU
 
 
@@ -898,14 +1032,173 @@ async def handle_shared_preset_name_input(update: Update, context: ContextTypes.
     presets[name] = {"bpm": bpm, "structure": serialize_structure(structure), "hidden": False}
     save_shared_presets(presets)
     context.user_data["awaiting_shared_preset_name"] = False
-    await update.message.reply_text(f"✅ Общий пресет '{name}' сохранен.", reply_markup=get_main_keyboard())
+    await update.message.reply_text(f"✅ Общий пресет '{name}' сохранен.", reply_markup=get_main_menu_for(update))
     return MAIN_MENU
+
+
+async def fetch_channel_avatar_bytes(bot):
+    try:
+        chat = await bot.get_chat(PUBLISH_CHANNEL)
+        if not chat.photo:
+            return None, None
+        file = await bot.get_file(chat.photo.big_file_id)
+        temp_path = f"channel_avatar_{chat.id}.jpg"
+        await file.download_to_drive(temp_path)
+        with open(temp_path, "rb") as image_file:
+            data = image_file.read()
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return data, "image/jpeg"
+    except Exception as err:
+        record_error("channel_avatar_fetch_failed", err)
+        return None, None
+
+
+def apply_id3_metadata(mp3_path, meta, cover_bytes=None, cover_mime=None):
+    try:
+        tags = ID3(mp3_path)
+    except Exception:
+        tags = ID3()
+    tags.delall("TIT2")
+    tags.delall("TCON")
+    tags.delall("TBPM")
+    tags.delall("TKEY")
+    tags.delall("APIC")
+    if meta.get("title"):
+        tags.add(TIT2(encoding=3, text=meta["title"]))
+    if meta.get("style"):
+        tags.add(TCON(encoding=3, text=meta["style"]))
+    if meta.get("bpm"):
+        tags.add(TBPM(encoding=3, text=str(meta["bpm"])))
+    if meta.get("key"):
+        tags.add(TKEY(encoding=3, text=meta["key"]))
+    if cover_bytes and cover_mime:
+        tags.add(APIC(encoding=3, mime=cover_mime, type=3, desc="Cover", data=cover_bytes))
+    tags.save(mp3_path)
+
+
+async def show_mp3_preview(update_or_query, context):
+    meta = context.user_data.get("mp3_draft_meta", {})
+    text = format_mp3_preview(meta)
+    keyboard = get_mp3_edit_keyboard()
+    if hasattr(update_or_query, "edit_message_text"):
+        await update_or_query.edit_message_text(text=text, reply_markup=keyboard)
+    else:
+        await update_or_query.message.reply_text(text, reply_markup=keyboard)
+
+
+async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update):
+        return
+    audio = update.message.audio
+    if not audio:
+        return
+    if not context.user_data.get("awaiting_admin_audio"):
+        await update.message.reply_text("Открой админ-панель кнопкой '🛠 Админ панель', потом отправь MP3.")
+        return
+    file_name = audio.file_name or "track.mp3"
+    if not file_name.lower().endswith(".mp3"):
+        await update.message.reply_text("Нужен именно MP3-файл.")
+        return
+    draft_name = f"draft_{update.effective_user.id}_{audio.file_unique_id}.mp3"
+    telegram_file = await audio.get_file()
+    await telegram_file.download_to_drive(draft_name)
+    context.user_data["mp3_draft_path"] = draft_name
+    context.user_data["mp3_draft_meta"] = parse_audio_filename(file_name)
+    context.user_data["awaiting_admin_audio"] = False
+    context.user_data["awaiting_mp3_field"] = None
+    await show_mp3_preview(update, context)
+
+
+async def handle_mp3_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data.startswith("mp3_"):
+        return
+    await query.answer()
+    if not is_admin_user(update):
+        await query.answer("Недостаточно прав", show_alert=True)
+        return
+    data = query.data
+
+    if data.startswith("mp3_edit_"):
+        field = data.replace("mp3_edit_", "", 1)
+        field_map = {"title": "Title", "style": "Style", "bpm": "BPM", "key": "Key"}
+        context.user_data["awaiting_mp3_field"] = field
+        await query.message.reply_text(f"Введи новое значение для {field_map.get(field, field)}:")
+        return
+
+    if data == "mp3_cancel":
+        draft_path = context.user_data.pop("mp3_draft_path", "")
+        context.user_data.pop("mp3_draft_meta", None)
+        context.user_data.pop("awaiting_mp3_field", None)
+        if draft_path and os.path.exists(draft_path):
+            try:
+                os.remove(draft_path)
+            except OSError:
+                record_error("mp3_draft_cleanup_failed", draft_path)
+        await query.edit_message_text("Черновик отменен.")
+        return
+
+    if data == "mp3_publish":
+        draft_path = context.user_data.get("mp3_draft_path", "")
+        meta = context.user_data.get("mp3_draft_meta")
+        if not draft_path or not meta or not os.path.exists(draft_path):
+            await query.answer("Черновик не найден", show_alert=True)
+            return
+        cover_bytes, cover_mime = await fetch_channel_avatar_bytes(context.bot)
+        apply_id3_metadata(draft_path, meta, cover_bytes=cover_bytes, cover_mime=cover_mime)
+        caption = get_mp3_caption(meta)
+        try:
+            with open(draft_path, "rb") as audio_file:
+                await context.bot.send_audio(chat_id=PUBLISH_CHANNEL, audio=audio_file, caption=caption)
+            await query.edit_message_text("Опубликовано в канал.")
+        except Exception as err:
+            record_error("mp3_publish_failed", err)
+            await query.edit_message_text("Не удалось опубликовать. Проверь права бота в канале.")
+        finally:
+            context.user_data.pop("mp3_draft_meta", None)
+            context.user_data.pop("awaiting_mp3_field", None)
+            context.user_data.pop("mp3_draft_path", None)
+            if os.path.exists(draft_path):
+                try:
+                    os.remove(draft_path)
+                except OSError:
+                    record_error("mp3_draft_cleanup_failed", draft_path)
+
+
+async def handle_mp3_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    field = context.user_data.get("awaiting_mp3_field")
+    if not field:
+        return False
+    meta = context.user_data.get("mp3_draft_meta")
+    if not meta:
+        context.user_data["awaiting_mp3_field"] = None
+        return False
+    value = update.message.text.strip()
+    if field == "bpm":
+        if not value.isdigit() or not (1 <= int(value) <= 300):
+            await update.message.reply_text("BPM должен быть целым числом от 1 до 300.")
+            return True
+    if field == "key" and value:
+        value = normalize_key(value)
+    meta[field] = value
+    context.user_data["mp3_draft_meta"] = meta
+    context.user_data["awaiting_mp3_field"] = None
+    await update.message.reply_text("Поле обновлено.")
+    await show_mp3_preview(update, context)
+    return True
 
 
 # -------------------- MAIN --------------------
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Set it in .env")
+    if ADMIN_USER_ID is None:
+        raise RuntimeError("ADMIN_USER_ID is missing or invalid in .env")
+    if not PUBLISH_CHANNEL:
+        raise RuntimeError("PUBLISH_CHANNEL is missing in .env")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Send startup notifications
@@ -919,63 +1212,78 @@ def main():
             MessageHandler(filters.Command("start"), start),
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_entry),
             MessageHandler(filters.PHOTO, handle_photo_entry),
+            MessageHandler(filters.AUDIO, process_audio_file),
         ],
         states={
             MAIN_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_choice),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             STYLE_CHOICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, style_choice),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             SETTINGS_CHOICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_choice),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             VEVO_SETTINGS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, vevo_settings),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_SETTINGS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_settings),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             VEVO_WM_SIZE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_wm_size),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_BLUR: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_blur),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_FG_SIZE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_fg_size),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_QUALITY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_quality),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             EXPLICIT_FORMAT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_format),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             CUSTOM_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             NOTIFICATIONS_TOGGLE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, notifications_toggle),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             BPM_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_input),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
             BPM_STRUCTURE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_structure),
-                MessageHandler(filters.PHOTO, process_photo)
+                MessageHandler(filters.PHOTO, process_photo),
+                MessageHandler(filters.AUDIO, process_audio_file),
             ],
         },
         fallbacks=[
@@ -991,6 +1299,7 @@ def main():
     app.add_handler(CommandHandler("loadpreset", loadpreset_command))
     app.add_handler(CommandHandler("deletepreset", deletepreset_command))
     app.add_handler(CommandHandler("loadshared", loadshared_command))
+    app.add_handler(CallbackQueryHandler(handle_mp3_callback, pattern=r"^mp3_"))
     app.add_error_handler(global_error_handler)
 
     app.run_polling()
@@ -1011,6 +1320,8 @@ async def handle_text_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await handle_preset_name_input(update, context)
     if context.user_data.get("awaiting_shared_preset_name"):
         return await handle_shared_preset_name_input(update, context)
+    if await handle_mp3_edit_text(update, context):
+        return MAIN_MENU
 
     # Обрабатываем текст как команду главного меню
     return await main_menu_choice(update, context)
@@ -1031,7 +1342,7 @@ async def handle_photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(
         "🎛 Фото готово! Выбери что дальше:",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_menu_for(update)
     )
     return MAIN_MENU
 

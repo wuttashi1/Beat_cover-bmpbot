@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+logs/
+presets/
+input_*.jpg
+edited_*.jpg
+edited_*.png
+draft_*.mp3
+channel_avatar_*.jpg
+users.db
