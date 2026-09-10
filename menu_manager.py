@@ -11,12 +11,11 @@ ADMIN_PANEL = 15
 
 def get_main_keyboard(is_admin=False):
     rows = [
-        ["🎨 Выбор стиля", "⚙️ Настройка стиля"],
-        ["🔢 BPM таймкоды", "🔔 Уведомления о перезапуске"],
-        ["🗂 BPM пресеты", "🛒 BPM магазин"],
+        ["🖼 Обложки", "🎵 BPM и таймкоды"],
+        ["🎧 MP3 и публикация", "⚙️ Бот"],
     ]
     if is_admin:
-        rows.append(["🛠 Админ панель"])
+        rows.append(["🛠 Админ панель", "👥 Доступ к боту"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -110,6 +109,7 @@ def get_bpm_structure_keyboard():
 def get_admin_panel_keyboard():
     return ReplyKeyboardMarkup(
         [
+            ["👥 Доступ к боту"],
             ["➕ Добавить ID публикатора", "📋 Список публикаторов"],
             ["➖ Удалить ID публикатора", "⬅️ Назад в меню"],
         ],

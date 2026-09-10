@@ -1,6 +1,7 @@
+from pathlib import Path
 from PIL import Image
 
-WATERMARK_PATH = "watermark.png"
+WATERMARK_PATH = Path(__file__).resolve().parent.parent / "watermark.png"
 TARGET_W, TARGET_H = 1920, 1080
 
 

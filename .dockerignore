@@ -1,0 +1,15 @@
+.git
+.env
+.venv
+__pycache__
+*.pyc
+tests
+logs
+presets
+users.db
+input_*.jpg
+edited_*.jpg
+edited_*.png
+draft_*.mp3
+channel_avatar_*.jpg
+

@@ -1,0 +1,17 @@
+services:
+  studio-bot:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: wutshy/studio-bot:local
+    container_name: studio-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BOT_DB_PATH: /data/users.db
+      BPM_PRESETS_DIR: /data/presets
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - /DATA/AppData/studio-bot/data:/data
+

@@ -1,6 +1,12 @@
 import sqlite3
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-DB_PATH = "users.db"
+load_dotenv()
+
+DB_PATH = os.getenv("BOT_DB_PATH", "users.db")
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 db = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = db.cursor()
 ALLOWED_FIELDS = {
@@ -111,17 +117,8 @@ def get_user_settings(uid):
         """, (uid, "vevo", 450, 300, 10, 820, "good", "photo", 0))
         db.commit()
         return get_user_settings(uid)
-    result = {
-        "user_id": row[0],
-        "style": row[1],
-        "vevo_wm_size": row[2],
-        "explicit_wm_size": row[3],
-        "explicit_blur": row[4],
-        "explicit_fg_size": row[5],
-        "explicit_quality": row[6],
-        "explicit_format": row[7],
-        "notifications_enabled": bool(row[8]) if len(row) > 8 else False
-    }
+    result = dict(zip((column[0] for column in cur.description), row))
+    result["notifications_enabled"] = bool(result.get("notifications_enabled", False))
     return result
 
 
@@ -129,8 +126,21 @@ def update_user_setting(uid, field, value):
     """Update single user setting"""
     if field not in ALLOWED_FIELDS:
         raise ValueError(f"Unsupported field update: {field}")
+    get_user_settings(uid)
     cur.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, uid))
     db.commit()
+    if field != "notifications_enabled":
+        from cover_store import CoverStore
+        store = CoverStore(DB_PATH)
+        settings = store.get(uid, get_user_settings(uid))
+        settings[field] = value
+        if field == "explicit_quality":
+            settings["export_format"] = "PNG" if value == "best" else "JPEG"
+            settings["jpeg_quality"] = {"draft":70, "good":90, "best":98}.get(value,98)
+        elif field == "explicit_format":
+            settings["delivery"] = value
+        store.put(uid, settings)
+
 
 
 def get_all_users():

@@ -1,4 +1,6 @@
 import html
+import sys
+from functools import wraps
 import logging
 import json
 import os
@@ -57,7 +59,7 @@ QUALITY_MAP = {
 }
 
 SHOWN_STARTUP_MESSAGE = set()
-PRESETS_DIR = "presets"
+PRESETS_DIR = os.getenv("BPM_PRESETS_DIR", "presets")
 SHARED_PRESETS_FILE = os.path.join(PRESETS_DIR, "shared_presets.json")
 ERROR_STATS_FILE = os.path.join("logs", "error_stats.json")
 DEFAULT_BPM_STRUCTURE = [
@@ -209,9 +211,6 @@ def record_error(error_type, details=None):
 def is_admin_user(update: Update):
     user = update.effective_user
     if not user or ADMIN_USER_ID is None:
-        return False
-    username = (user.username or "").lower()
-    if ADMIN_USERNAME and username != ADMIN_USERNAME:
         return False
     return user.id == ADMIN_USER_ID
 
@@ -455,6 +454,9 @@ async def send_startup_notifications(app):
         logger.info(f"Starting bot - checking notifications for {len(users)} users")
         
         for user_id in users:
+            from access_control import allowed
+            if not allowed(user_id, ADMIN_USER_ID):
+                continue
             try:
                 settings = get_user_settings(user_id)
                 notifications_enabled = settings.get("notifications_enabled", False)
@@ -479,6 +481,8 @@ async def send_startup_notifications(app):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await studio.cancel_pending(context)
+    context.user_data["studio_section"] = "home"
     uid = update.effective_user.id
     settings = await init_user(uid)
     
@@ -985,12 +989,18 @@ async def custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bpm_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "⬅️ Назад":
-        await update.message.reply_text("🎛 STUDIO BOT — главное меню", reply_markup=get_main_menu_for(update))
+        context.user_data.pop("bpm_selected_structure", None)
+        await studio.section(update, context, "bpm")
         return MAIN_MENU
     try:
         bpm = int(text)
         if not (1 <= bpm <= 300):
             raise ValueError
+        selected = context.user_data.pop("bpm_selected_structure", None)
+        if selected:
+            remember_bpm_result(context, bpm, selected)
+            await update.message.reply_text(f"✅ BPM: {bpm}\n\n{build_timestamps(selected,bpm)}", reply_markup=keyboard(BPM_ROWS))
+            return MAIN_MENU
         context.user_data["bpm"] = bpm
         await update.message.reply_text(
             "Выбери способ расчета:\n"
@@ -1022,7 +1032,7 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Таймкоды готовы\nBPM: {bpm}\n\n{timestamps}\n\n"
             "Сохранить: /savepreset\nВ общий доступ: /save_to_shared",
-            reply_markup=get_main_menu_for(update)
+            reply_markup=keyboard(BPM_ROWS)
         )
         return MAIN_MENU
 
@@ -1044,7 +1054,7 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Таймкоды готовы\nBPM: {bpm}\n\n{timestamps}\n\n"
                 "Сохранить: /savepreset\nВ общий доступ: /save_to_shared",
-                reply_markup=get_main_menu_for(update)
+                reply_markup=keyboard(BPM_ROWS)
             )
             return MAIN_MENU
         except (ValueError, TypeError):
@@ -1061,70 +1071,8 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_mp3_cover") and can_publish_to_channel(update):
         await process_mp3_cover_photo(update, context)
         return
-    uid = update.effective_user.id
-    logger.info(f"Processing photo for user {uid}")
-    
-    settings = get_user_settings(uid)
-    logger.info(f"User settings: {settings}")
+    await studio.photo(update, context)
 
-    input_path = f"input_{uid}.jpg"
-    output_path = ""
-
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        await photo_file.download_to_drive(input_path)
-
-        img = Image.open(input_path).convert("RGB")
-
-        if settings["style"] == "explicit":
-            result = style_explicit(
-                img,
-                wm_size=settings["explicit_wm_size"],
-                blur_strength=settings["explicit_blur"],
-                fg_size=settings["explicit_fg_size"],
-                quality_level=settings["explicit_quality"]
-            )
-        else:
-            result = style_vevo(img, wm_size=settings["vevo_wm_size"])
-
-        result = result.convert("RGB")
-        quality_level = settings["explicit_quality"]
-        quality_value = QUALITY_MAP.get(quality_level, 10)
-
-        if quality_level == "best":
-            output_path = f"edited_{uid}.png"
-            result.save(output_path, "PNG", optimize=False)
-            logger.info("Saved as PNG with maximum quality")
-        else:
-            output_path = f"edited_{uid}.jpg"
-            save_quality = min(98, 90 + quality_value)
-            result.save(
-                output_path,
-                "JPEG",
-                quality=save_quality,
-                optimize=False,
-                progressive=False
-            )
-            logger.info(f"Saved as JPEG with quality {save_quality}")
-
-        if settings["explicit_format"] == "file":
-            with open(output_path, "rb") as file_obj:
-                await update.message.reply_document(document=file_obj)
-        else:
-            with open(output_path, "rb") as file_obj:
-                await update.message.reply_photo(photo=file_obj)
-    except Exception as err:
-        logger.exception("Photo processing failed: %s", err)
-        record_error("photo_processing_failed", err)
-        await update.message.reply_text("❌ Не получилось обработать фото. Попробуй еще раз.")
-    finally:
-        for path in (input_path, output_path):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    logger.warning("Failed to cleanup temporary file: %s", path)
-                    record_error("temp_file_cleanup_failed", path)
 
 
 async def savepreset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1132,7 +1080,7 @@ async def savepreset_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Сначала рассчитай таймкоды BPM.")
         return
     context.user_data["awaiting_preset_name"] = True
-    await update.message.reply_text("Введите имя для пресета:")
+    await update.message.reply_text("Введите имя для пресета (1–40 символов):", reply_markup=keyboard([["⬅️ Назад", "🏠 Главное меню"]]))
 
 
 async def save_to_shared_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1140,7 +1088,7 @@ async def save_to_shared_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Сначала рассчитай таймкоды BPM.")
         return
     context.user_data["awaiting_shared_preset_name"] = True
-    await update.message.reply_text("Введите имя для общего пресета:")
+    await update.message.reply_text("Введите имя для общего пресета (1–40 символов):", reply_markup=keyboard([["⬅️ Назад", "🏠 Главное меню"]]))
 
 
 async def mypresets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1185,6 +1133,8 @@ async def loadpreset_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         structure = deserialize_structure(preset["structure"])
         bpm = int(preset["bpm"])
+        if not 1 <= bpm <= 300:
+            raise ValueError("Invalid BPM")
     except (KeyError, TypeError, ValueError):
         await update.message.reply_text("Пресет поврежден и не может быть загружен.")
         record_error("load_user_preset_failed", name)
@@ -1222,6 +1172,8 @@ async def loadshared_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         structure = deserialize_structure(preset["structure"])
         bpm = int(preset["bpm"])
+        if not 1 <= bpm <= 300:
+            raise ValueError("Invalid BPM")
     except (KeyError, TypeError, ValueError):
         await update.message.reply_text("Общий пресет поврежден и не может быть загружен.")
         record_error("load_shared_preset_failed", name)
@@ -1233,8 +1185,8 @@ async def loadshared_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_preset_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text("Имя не может быть пустым.")
+    if not 1 <= len(name) <= 40:
+        await update.message.reply_text("Имя должно содержать 1–40 символов.")
         return MAIN_MENU
     user_id = update.effective_user.id
     bpm = context.user_data.get("last_bpm")
@@ -1243,17 +1195,20 @@ async def handle_preset_name_input(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Сначала рассчитай таймкоды BPM.")
         return MAIN_MENU
     presets = load_presets(user_id)
+    if name in presets:
+        await update.message.reply_text("Такое имя уже есть. Введи другое, чтобы сохранить существующий пресет.")
+        return MAIN_MENU
     presets[name] = {"bpm": bpm, "structure": serialize_structure(structure)}
     save_presets(user_id, presets)
     context.user_data["awaiting_preset_name"] = False
-    await update.message.reply_text(f"✅ Пресет '{name}' сохранен.", reply_markup=get_main_menu_for(update))
+    await update.message.reply_text(f"✅ Пресет '{name}' сохранен.", reply_markup=keyboard(BPM_ROWS))
     return MAIN_MENU
 
 
 async def handle_shared_preset_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text("Имя не может быть пустым.")
+    if not 1 <= len(name) <= 40:
+        await update.message.reply_text("Имя должно содержать 1–40 символов.")
         return MAIN_MENU
     bpm = context.user_data.get("last_bpm")
     structure = context.user_data.get("last_bpm_structure")
@@ -1261,10 +1216,13 @@ async def handle_shared_preset_name_input(update: Update, context: ContextTypes.
         await update.message.reply_text("Сначала рассчитай таймкоды BPM.")
         return MAIN_MENU
     presets = load_shared_presets()
+    if name in presets:
+        await update.message.reply_text("Такое имя уже есть. Введи другое, чтобы сохранить существующий пресет.")
+        return MAIN_MENU
     presets[name] = {"bpm": bpm, "structure": serialize_structure(structure), "hidden": False}
     save_shared_presets(presets)
     context.user_data["awaiting_shared_preset_name"] = False
-    await update.message.reply_text(f"✅ Общий пресет '{name}' сохранен.", reply_markup=get_main_menu_for(update))
+    await update.message.reply_text(f"✅ Общий пресет '{name}' сохранен.", reply_markup=keyboard(BPM_ROWS))
     return MAIN_MENU
 
 
@@ -1381,11 +1339,18 @@ async def send_mp3_audio_preview(
 
 async def process_mp3_cover_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    photo_file = await update.message.photo[-1].get_file()
+    media = update.message.document or update.message.photo[-1]
+    photo_file = await media.get_file()
     path = f"cover_{uid}_{os.getpid()}.jpg"
     await photo_file.download_to_drive(path)
-    with open(path, "rb") as f:
-        context.user_data["mp3_custom_cover_bytes"] = f.read()
+    from io import BytesIO
+    from PIL import ImageOps
+    with Image.open(path) as image:
+        cover = ImageOps.exif_transpose(image).convert("RGB")
+        cover.thumbnail((1600,1600))
+        buffer = BytesIO()
+        cover.save(buffer,"JPEG",quality=95)
+        context.user_data["mp3_custom_cover_bytes"] = buffer.getvalue()
     context.user_data["mp3_custom_cover_mime"] = "image/jpeg"
     context.user_data["awaiting_mp3_cover"] = False
     try:
@@ -1404,7 +1369,7 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Нет доступа к публикации в канал. Попроси админа добавить твой user_id в список публикаторов."
         )
         return MAIN_MENU
-    audio = update.message.audio
+    audio = update.message.audio or update.message.document
     if not audio:
         return MAIN_MENU
     file_name = audio.file_name or "track.mp3"
@@ -1412,6 +1377,7 @@ async def process_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Нужен именно MP3-файл.")
         return MAIN_MENU
     draft_name = f"draft_{update.effective_user.id}_{audio.file_unique_id}.mp3"
+    await _mp3_cleanup_draft(context)
     telegram_file = await audio.get_file()
     await telegram_file.download_to_drive(draft_name)
     context.user_data["mp3_draft_path"] = draft_name
@@ -1641,6 +1607,8 @@ def main():
     if not PUBLISH_CHANNEL:
         raise RuntimeError("PUBLISH_CHANNEL is missing in .env")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    from access_control import install
+    install(app, ADMIN_USER_ID)
 
     # Send startup notifications
     async def startup(application):
@@ -1648,115 +1616,13 @@ def main():
 
     app.post_init = startup
 
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Command("start"), start),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_entry),
-            MessageHandler(filters.PHOTO, handle_photo_entry),
-            MessageHandler(filters.AUDIO, process_audio_file),
-        ],
-        states={
-            MAIN_MENU: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_choice),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            STYLE_CHOICE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, style_choice),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            SETTINGS_CHOICE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, settings_choice),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            VEVO_SETTINGS: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, vevo_settings),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            EXPLICIT_SETTINGS: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_settings),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            VEVO_WM_SIZE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_wm_size),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            EXPLICIT_BLUR: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_blur),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            EXPLICIT_FG_SIZE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_fg_size),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            EXPLICIT_QUALITY: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_quality),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            EXPLICIT_FORMAT: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, explicit_format),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            CUSTOM_INPUT: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            NOTIFICATIONS_TOGGLE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, notifications_toggle),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            BPM_INPUT: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_input),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            BPM_STRUCTURE: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bpm_structure),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-            ADMIN_PANEL: [
-                _mp3_query_handler(),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_choice),
-                MessageHandler(filters.PHOTO, process_photo),
-                MessageHandler(filters.AUDIO, process_audio_file),
-            ],
-        },
-        fallbacks=[
-            MessageHandler(filters.Command("start"), start),
-            _mp3_query_handler(),
-        ],
-    )
+    conv_handler = build_conversation()
 
     app.add_handler(conv_handler)
     # Handle MP3 inline callbacks even if conversation state was lost
     # (e.g. bot restart while user still clicks old inline buttons).
     app.add_handler(_mp3_query_handler())
+    app.add_handler(CallbackQueryHandler(studio_callback, pattern=r"^(cv|bp):"))
     app.add_handler(CommandHandler("savepreset", savepreset_command))
     app.add_handler(CommandHandler("save_to_shared", save_to_shared_command))
     app.add_handler(CommandHandler("mypresets", mypresets_command))
@@ -1811,6 +1677,68 @@ async def handle_photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=get_main_menu_for(update)
     )
     return MAIN_MENU
+
+
+# A single navigation/pending-input router runs before every state's text handler.
+# This also fixes preset names and MP3 edits being swallowed by MAIN_MENU.
+from studio_ui import StudioUI, BPM_ROWS, keyboard
+studio = StudioUI(sys.modules[__name__])
+IMAGE_FILTER = filters.PHOTO | filters.Document.IMAGE
+AUDIO_FILTER = filters.AUDIO | filters.Document.MimeType("audio/mpeg") | filters.Document.FileExtension("mp3")
+
+
+async def studio_callback(update, context):
+    state = await studio.callback(update, context)
+    if context.user_data.pop("bpm_tempo_pending", False):
+        return BPM_INPUT
+    return state
+
+
+def routed(handler):
+    @wraps(handler)
+    async def wrapped(update, context):
+        state = await studio.route(update, context)
+        if state is not None:
+            return state
+        return await handler(update, context)
+    return wrapped
+
+
+async def menu_command(update, context):
+    await studio.cancel_pending(context)
+    context.user_data.pop("bpm_selected_structure", None)
+    return await studio.section(update, context, "home")
+
+
+def build_conversation():
+    handlers = {
+        MAIN_MENU: main_menu_choice, STYLE_CHOICE: style_choice,
+        SETTINGS_CHOICE: settings_choice, VEVO_SETTINGS: vevo_settings,
+        EXPLICIT_SETTINGS: explicit_settings, VEVO_WM_SIZE: explicit_wm_size,
+        EXPLICIT_BLUR: explicit_blur, EXPLICIT_FG_SIZE: explicit_fg_size,
+        EXPLICIT_QUALITY: explicit_quality, EXPLICIT_FORMAT: explicit_format,
+        CUSTOM_INPUT: custom_input, NOTIFICATIONS_TOGGLE: notifications_toggle,
+        BPM_INPUT: bpm_input, BPM_STRUCTURE: bpm_structure, ADMIN_PANEL: admin_panel_choice,
+    }
+    states = {state: [
+        _mp3_query_handler(),
+        CallbackQueryHandler(studio_callback, pattern=r"^(cv|bp):"),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, routed(handler)),
+        MessageHandler(IMAGE_FILTER, process_photo),
+        MessageHandler(AUDIO_FILTER, process_audio_file),
+    ] for state, handler in handlers.items()}
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler(["menu", "cancel"], menu_command),
+            CallbackQueryHandler(studio_callback, pattern=r"^(cv|bp):"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, routed(main_menu_choice)),
+            MessageHandler(IMAGE_FILTER, handle_photo_entry),
+            MessageHandler(AUDIO_FILTER, process_audio_file),
+        ],
+        states=states,
+        fallbacks=[CommandHandler("start", start), CommandHandler(["menu", "cancel"], menu_command), _mp3_query_handler()],
+    )
 
 
 if __name__ == "__main__":
