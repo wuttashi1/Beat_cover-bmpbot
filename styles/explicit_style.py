@@ -1,6 +1,7 @@
+from pathlib import Path
 from PIL import Image, ImageChops
 
-EXPLICIT_WM_PATH = "explicit_wm.png"
+EXPLICIT_WM_PATH = Path(__file__).resolve().parent.parent / "explicit_wm.png"
 TARGET_W, TARGET_H = 1920, 1080
 
 
