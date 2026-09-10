@@ -61,7 +61,7 @@ class StudioUI:
     async def cancel_pending(self, context):
         for key in ("studio_input","awaiting_preset_name","awaiting_shared_preset_name","awaiting_custom_structure",
                     "awaiting_publisher_add","awaiting_publisher_remove","input_type","return_state",
-                    "bpm_selected_structure","bpm_tempo_pending"):
+                    "bpm_selected_structure","bpm_tempo_pending","access_action"):
             context.user_data.pop(key,None)
         # Leaving a section cancels the MP3 draft so an old cover prompt cannot eat a new thumbnail.
         await self.host._mp3_cleanup_draft(context)
@@ -73,6 +73,9 @@ class StudioUI:
         if text in (HOME,COVERS,BPM,MP3,SETTINGS,"⬅️ Назад в меню"):
             await self.cancel_pending(context)
             return await self.section(update,context,{COVERS:"cover",BPM:"bpm",MP3:"mp3",SETTINGS:"settings"}.get(text,"home"))
+        from access_control import manage
+        if await manage(update, context, self.host.ADMIN_USER_ID):
+            return 0
         if text == "⬅️ Назад" and pending:
             context.user_data.pop("studio_input",None)
             return await self.section(update,context,"cover")
@@ -89,10 +92,17 @@ class StudioUI:
             return self.host.BPM_INPUT
         if text == "🔔 Уведомления о перезапуске":
             return await self.host.main_menu_choice(update,context)
+        if text in ("🎬 VEVO", "🔞 EXPLICIT"):
+            s = self.profile(uid)
+            s["style"] = "vevo" if text.startswith("🎬") else "explicit"
+            self.store.put(uid, s)
+            await self.section(update, context, "cover")
+            return 0
         if text == "📷 Создать обложку":
             await update.effective_message.reply_text("Пришли картинку. Для лучшего качества отправь её файлом. Для повторной обработки последней картинки нажми «Пересобрать обложку».")
             return 0
-        if text == "⚙️ Параметры обложки":
+        if text in ("⚙️ Параметры обложки", "⚙️ Настройка стиля"):
+            await self.section(update, context, "cover")
             await self.settings(update,uid)
             return 0
         if text == "💾 Сохранить обложку как пресет":
@@ -135,6 +145,8 @@ class StudioUI:
                 await self.section(update,context,"cover")
                 if action == "field":
                     await self.settings(update,uid,FIELDS[key][2])
+                    if context.user_data.get("cover_source"):
+                        await self.photo(update,context,repeat=True)
             except ValueError as error:
                 await update.effective_message.reply_text(str(error))
             return 0
@@ -160,11 +172,17 @@ class StudioUI:
             return
         rows = []
         for key,(label,spec,category) in FIELDS.items():
+            explicit_only = {"background", "explicit_blur", "background_brightness", "explicit_fg_size", "foreground_x", "foreground_y", "explicit_wm_size"}
+            vevo_only = {"fit", "vevo_wm_size"}
+            if s["style"] == "vevo" and key in explicit_only:
+                continue
+            if s["style"] == "explicit" and key in vevo_only:
+                continue
             if category == group:
                 value = spec.get(s[key],s[key]) if isinstance(spec,dict) else s[key]
                 rows.append([Button(f"{label}: {value}",callback_data=f"cv:field:{key}")])
         rows.append([Button("⬅️ Все параметры",callback_data="cv:group:all")])
-        await self.screen(update,GROUPS[group],rows)
+        await self.screen(update,f"{GROUPS[group]} · {s['style'].upper()}",rows)
 
     async def presets(self,update,uid,page=0):
         items = self.store.list(uid)
@@ -221,7 +239,10 @@ class StudioUI:
                 s=self.profile(uid)
                 s[key]=validate_value(key,parts[3])
                 self.store.put(uid,s)
+                await query.message.reply_text("✅ Настройка сохранена", reply_markup=keyboard(COVER_ROWS))
                 await self.settings(update,uid,FIELDS[key][2])
+                if context.user_data.get("cover_source"):
+                    await self.photo(update,context,repeat=True)
             elif action=="list":
                 await self.presets(update,uid,int(key))
             elif action in ("preset","load","rename","delete","confirm"):

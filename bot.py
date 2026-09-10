@@ -212,9 +212,6 @@ def is_admin_user(update: Update):
     user = update.effective_user
     if not user or ADMIN_USER_ID is None:
         return False
-    username = (user.username or "").lower()
-    if ADMIN_USERNAME and username != ADMIN_USERNAME:
-        return False
     return user.id == ADMIN_USER_ID
 
 
@@ -457,6 +454,9 @@ async def send_startup_notifications(app):
         logger.info(f"Starting bot - checking notifications for {len(users)} users")
         
         for user_id in users:
+            from access_control import allowed
+            if not allowed(user_id, ADMIN_USER_ID):
+                continue
             try:
                 settings = get_user_settings(user_id)
                 notifications_enabled = settings.get("notifications_enabled", False)
@@ -1607,6 +1607,8 @@ def main():
     if not PUBLISH_CHANNEL:
         raise RuntimeError("PUBLISH_CHANNEL is missing in .env")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    from access_control import install
+    install(app, ADMIN_USER_ID)
 
     # Send startup notifications
     async def startup(application):
