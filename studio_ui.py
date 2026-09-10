@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 from io import BytesIO
+from telegram.error import BadRequest
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Inline, ReplyKeyboardMarkup
 from cover_settings import FIELDS, GROUPS, builtin, validate_value
 from cover_store import CoverStore
@@ -13,10 +14,12 @@ COVERS = "🖼 Обложки"
 BPM = "🎵 BPM и таймкоды"
 MP3 = "🎧 MP3 и публикация"
 SETTINGS = "⚙️ Бот"
-COVER_ROWS = [["📷 Создать обложку", "⚙️ Параметры обложки"], ["💾 Сохранить обложку как пресет", "🗂 Мои обложки"], ["🎬 VEVO — оригинал", "🔞 EXPLICIT — оригинал"], ["🔄 Пересобрать обложку"], [HOME]]
+COVER_ROWS = [["📷 Создать обложку", "⚙️ Параметры обложки"], ["🗂 Обложки и пресеты", "🔄 Пересобрать обложку"], [HOME]]
+LIBRARY_ROWS = [["📦 Базовые обложки", "🗂 Мои обложки"], ["💾 Сохранить обложку как пресет"], ["⬅️ К обложкам", HOME]]
+BASIC_ROWS = [["🎬 VEVO — оригинал", "🔞 EXPLICIT — оригинал"], ["🗂 Обложки и пресеты", HOME]]
 BPM_ROWS = [["🔢 BPM таймкоды", "🗂 BPM пресеты"], ["💾 Сохранить BPM пресет", "🛒 BPM магазин"], ["🌍 Поделиться BPM пресетом"], [HOME]]
 NAV = {HOME,COVERS,BPM,MP3,SETTINGS,"⬅️ Назад","⬅️ Назад в меню"}
-NAV.update(x for row in COVER_ROWS+BPM_ROWS for x in row)
+NAV.update(x for row in COVER_ROWS+BPM_ROWS+LIBRARY_ROWS+BASIC_ROWS for x in row)
 NAV.add("🔔 Уведомления о перезапуске")
 
 
@@ -47,7 +50,7 @@ class StudioUI:
             await update.effective_message.reply_text(
                 f"🖼 Обложки · {s['style'].upper()} · {s['resolution']} · {s['export_format']}\n"
                 "Отправь картинку как фото или файл. Настройки сохраняются автоматически.\n"
-                "Готовые VEVO и EXPLICIT доступны ниже.",reply_markup=keyboard(COVER_ROWS))
+                "VEVO и EXPLICIT: «Обложки и пресеты → Базовые обложки».",reply_markup=keyboard(COVER_ROWS))
         elif section == "bpm":
             await update.effective_message.reply_text("🎵 BPM и таймкоды\nРасчёт по BPM и структуре в тактах (4/4). Выбери действие:",reply_markup=keyboard(BPM_ROWS))
         elif section == "mp3":
@@ -97,6 +100,14 @@ class StudioUI:
             s["style"] = "vevo" if text.startswith("🎬") else "explicit"
             self.store.put(uid, s)
             await self.section(update, context, "cover")
+            return 0
+        if text == "⬅️ К обложкам":
+            return await self.section(update,context,"cover")
+        if text == "🗂 Обложки и пресеты":
+            await update.effective_message.reply_text("🗂 Обложки и пресеты\nВыбери базовую обложку или свой сохранённый вариант.",reply_markup=keyboard(LIBRARY_ROWS))
+            return 0
+        if text == "📦 Базовые обложки":
+            await update.effective_message.reply_text("📦 Базовые обложки\nVEVO — изображение на весь холст с логотипом.\nEXPLICIT — центральное фото на фоне с размытием.\nВыбор восстанавливает исходные параметры; свои варианты доступны в «Мои обложки».",reply_markup=keyboard(BASIC_ROWS))
             return 0
         if text == "📷 Создать обложку":
             await update.effective_message.reply_text("Пришли картинку. Для лучшего качества отправь её файлом. Для повторной обработки последней картинки нажми «Пересобрать обложку».")
@@ -214,7 +225,13 @@ class StudioUI:
 
     async def callback(self,update,context):
         query=update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except BadRequest as error:
+            # Telegram expires callback acknowledgements; the setting itself can still be applied.
+            if "query is too old" not in str(error).lower() and "query id is invalid" not in str(error).lower():
+                raise
+            self.host.logger.warning("Expired inline acknowledgement; processing action")
         uid=update.effective_user.id
         parts=query.data.split(":")
         try:

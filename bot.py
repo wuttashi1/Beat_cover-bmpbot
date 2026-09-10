@@ -1632,7 +1632,8 @@ def main():
     app.add_handler(CommandHandler("loadshared", loadshared_command))
     app.add_error_handler(global_error_handler)
 
-    app.run_polling()
+    logger.info("Studio bot: inline polling enabled (message, callback_query)")
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 # -------------------- ENTRY POINTS --------------------
@@ -1688,6 +1689,7 @@ AUDIO_FILTER = filters.AUDIO | filters.Document.MimeType("audio/mpeg") | filters
 
 
 async def studio_callback(update, context):
+    logger.info("Inline callback received: %s", update.callback_query.data)
     state = await studio.callback(update, context)
     if context.user_data.pop("bpm_tempo_pending", False):
         return BPM_INPUT
