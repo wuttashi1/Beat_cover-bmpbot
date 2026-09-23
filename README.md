@@ -2,41 +2,39 @@
 
 # Beat Cover & BPM
 
-Telegram-бот для оформления музыкальных обложек, расчёта таймкодов по BPM и редактирования MP3-тегов.
+Telegram toolkit for music cover artwork, BPM-based timestamps, MP3 metadata and publishing workflows.
 
-[Правила разработки](CONTRIBUTING.md) · [Ветки](https://github.com/wuttashi1/Beat_cover-bmpbot/branches)
+[Contributing](CONTRIBUTING.md) · [Branches](https://github.com/wuttashi1/Beat_cover-bmpbot/branches)
 
 </div>
 
 ---
 
-## Возможности
+## Features
 
-- Оформление обложек, настройка водяных знаков, качества и формата.
-- Расчёт таймкодов по BPM и структуре трека.
-- Личные и общие пресеты.
-- Редактирование MP3-метаданных и подготовка публикаций в Telegram.
+- Cover artwork with configurable styles, watermarks and export settings.
+- Timestamps calculated from BPM and track structure.
+- Personal and shared presets.
+- MP3 metadata editing and Telegram publishing tools.
 
-## Запуск
+## Quick start
 
-Установите Python 3.11 и зависимости в виртуальном окружении:
+Use Python 3.11. Create and activate a virtual environment, then:
 
 ```bash
-python -m venv .venv
-# Активируйте .venv для вашей оболочки
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-Перед запуском создайте локальный `.env` с `BOT_TOKEN`. Дополнительные параметры: `ADMIN_USER_ID`, `ADMIN_USERNAME`, `PUBLISH_CHANNEL`. Для операций с аудио может понадобиться установленный FFmpeg.
+Before starting, create a local `.env` containing `BOT_TOKEN`. Optional settings include `ADMIN_USER_ID`, `ADMIN_USERNAME` and `PUBLISH_CHANNEL`. Audio operations may require FFmpeg installed on the host.
 
-## Навигация
+## Project layout
 
-- `main.py` — точка входа.
-- `bot.py` — основной Telegram-бот.
-- `database.py` — хранение данных.
-- `styles/` и `presets/` — оформление и пресеты.
+- `main.py` — entry point.
+- `bot.py` — primary Telegram application.
+- `database.py` — data storage.
+- `styles/` and `presets/` — artwork and presets.
 
-## Разработка
+## Development
 
-Соглашения по веткам и изменениям: [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch and contribution guidelines.
