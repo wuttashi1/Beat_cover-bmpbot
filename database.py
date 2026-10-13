@@ -137,3 +137,51 @@ def get_all_users():
     """Get list of all user IDs"""
     cur.execute("SELECT user_id FROM users")
     return [row[0] for row in cur.fetchall()]
+
+
+def migrate_video_database():
+    db.executescript('''
+    CREATE TABLE IF NOT EXISTS video_folders (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+        UNIQUE(user_id, name));
+    CREATE TABLE IF NOT EXISTS video_assets (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, folder_id INTEGER NOT NULL,
+        filename TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL,
+        duration REAL NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+        fps REAL NOT NULL, codec TEXT NOT NULL, tags TEXT DEFAULT '[]',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, hash));
+    CREATE TABLE IF NOT EXISTS video_projects (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+        payload TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS video_presets (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+        payload TEXT NOT NULL, is_default INTEGER DEFAULT 0, UNIQUE(user_id, name));
+    CREATE TABLE IF NOT EXISTS video_analysis_cache (
+        cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS video_connections (
+        user_id INTEGER PRIMARY KEY, encrypted BLOB NOT NULL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS video_runtime_settings (
+        id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS video_render_jobs (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, project_id INTEGER NOT NULL,
+        status TEXT NOT NULL, progress REAL DEFAULT 0, payload TEXT NOT NULL,
+        output TEXT, error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    ''')
+    db.commit()
+
+
+def video_execute(sql, parameters=()):
+    cursor = db.execute(sql, parameters)
+    db.commit()
+    return cursor.lastrowid
+
+
+def video_rows(sql, parameters=()):
+    cursor = db.execute(sql, parameters)
+    columns = [x[0] for x in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+migrate_video_database()

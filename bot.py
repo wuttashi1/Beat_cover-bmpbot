@@ -1766,6 +1766,8 @@ def main():
     app.add_handler(CommandHandler("loadshared", loadshared_command))
     app.add_error_handler(global_error_handler)
 
+    from video_generator.handlers import register
+    register(app)
     app.run_polling()
 
 
