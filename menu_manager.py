@@ -15,6 +15,7 @@ def get_main_keyboard(is_admin=False):
         ["🔢 BPM таймкоды", "🔔 Уведомления о перезапуске"],
         ["🗂 BPM пресеты", "🛒 BPM магазин"],
     ]
+    rows.append(["🎬 Video Generator"])
     if is_admin:
         rows.append(["🛠 Админ панель"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)

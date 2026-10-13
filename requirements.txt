@@ -4,3 +4,9 @@ python-dotenv
 mutagen
 pydub==0.25.1
 ffmpeg-python==0.2.0
+numpy>=1.24,<3
+scipy>=1.10,<2
+cryptography>=42,<51
+telethon>=1.36,<2
+google-api-python-client>=2.100,<3
+google-auth-oauthlib>=1.2,<2
