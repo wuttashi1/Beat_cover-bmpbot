@@ -1057,7 +1057,8 @@ async def bpm_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return BPM_STRUCTURE
 
 
-async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, repeat=False):
+    message = update.effective_message
     if context.user_data.get("awaiting_mp3_cover") and can_publish_to_channel(update):
         await process_mp3_cover_photo(update, context)
         return
@@ -1071,8 +1072,23 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output_path = ""
 
     try:
-        photo_file = await update.message.photo[-1].get_file()
-        await photo_file.download_to_drive(input_path)
+        import shutil
+        from pathlib import Path
+        from video_generator.library import storage
+        source = storage() / 'cover_sources' / f'{uid}.image'
+        if repeat:
+            cached = Path(context.user_data.get('cover_ui_source') or source)
+            if not cached.is_file():
+                raise ValueError('Сначала отправьте изображение.')
+            shutil.copy2(cached,input_path)
+        else:
+            media = message.document or message.photo[-1]
+            photo_file = await media.get_file()
+            await photo_file.download_to_drive(input_path)
+            if context.user_data.get('ui_section') == 'covers':
+                source.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(input_path,source)
+                context.user_data['cover_ui_source'] = str(source)
 
         img = Image.open(input_path).convert("RGB")
 
@@ -1107,16 +1123,19 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info(f"Saved as JPEG with quality {save_quality}")
 
-        if settings["explicit_format"] == "file":
+        if context.user_data.get('ui_section') == 'covers':
+            from studio_menu import deliver_cover
+            await deliver_cover(update,context,output_path)
+        elif settings["explicit_format"] == "file":
             with open(output_path, "rb") as file_obj:
-                await update.message.reply_document(document=file_obj)
+                await message.reply_document(document=file_obj)
         else:
             with open(output_path, "rb") as file_obj:
-                await update.message.reply_photo(photo=file_obj)
+                await message.reply_photo(photo=file_obj)
     except Exception as err:
         logger.exception("Photo processing failed: %s", err)
         record_error("photo_processing_failed", err)
-        await update.message.reply_text("❌ Не получилось обработать фото. Попробуй еще раз.")
+        await message.reply_text("❌ Не получилось обработать фото. Попробуй еще раз.")
     finally:
         for path in (input_path, output_path):
             if path and os.path.exists(path):
@@ -1808,10 +1827,6 @@ async def handle_photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if was_awaiting_mp3_cover and not context.user_data.get("awaiting_mp3_cover"):
         return MAIN_MENU
 
-    await update.message.reply_text(
-        "🎛 Фото готово! Выбери что дальше:",
-        reply_markup=get_main_menu_for(update)
-    )
     return MAIN_MENU
 
 

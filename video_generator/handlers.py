@@ -20,7 +20,9 @@ from telegram.ext import (
     filters,
 )
 
+from bot_ui import dismiss_input, navigation, present
 from database import video_rows
+from .ui_labels import button as ui_button, label as ui_label, value as ui_value
 from . import library, projects
 from .config import (
     BACKGROUND_STYLES,
@@ -37,16 +39,16 @@ from .queue import RenderQueue
 logger = logging.getLogger(__name__)
 ACTIVE_USERS = set()
 CATEGORIES_LABELS = {
-    "foreground": "🎞 Main Video",
-    "background": "🌫 Background",
-    "color": "🎨 Color",
-    "motion": "🎥 Motion",
-    "beat_reaction": "⚡ Beat Reaction",
-    "blackout": "🌑 Quiet / Blackout",
-    "transitions": "🔀 Sections & Transitions",
-    "canvas": "📐 Canvas",
-    "export": "🎬 Export",
-    "analysis": "🧠 Audio Analysis",
+    "foreground": "🎞 Основное видео",
+    "background": "🌫 Фон",
+    "color": "🎨 Цвет",
+    "motion": "🎥 Движение",
+    "beat_reaction": "⚡ Реакция на бит",
+    "blackout": "🌑 Затемнение",
+    "transitions": "🔀 Переходы",
+    "canvas": "📐 Холст",
+    "export": "🎬 Экспорт",
+    "analysis": "🧠 Анализ аудио",
 }
 
 
@@ -61,25 +63,20 @@ class VideoMessages(filters.MessageFilter):
 
 def keyboard(project, rows):
     prefix = f"vg:{project['id']}:" if project else "vg:"
-    return Markup(
+    buttons = [
         [
-            [Button(label, callback_data=prefix + action) for label, action in row]
-            for row in rows
+            Button(ui_button(label), callback_data=prefix + action)
+            for label, action in row
         ]
-    )
+        for row in rows
+    ]
+    buttons.append(navigation("ui:video"))
+    buttons.append([Button("⌂ Студия", callback_data="ui:home")])
+    return Markup(buttons)
 
 
 async def screen(update, project, text, rows):
-    text = text[:4000]
-    markup = keyboard(project, rows)
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=markup)
-        except TelegramError as error:
-            if "not modified" not in str(error).lower():
-                await update.effective_message.reply_text(text, reply_markup=markup)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=markup)
+    return await present(update, text, keyboard(project, rows))
 
 
 def current(update, context):
@@ -116,30 +113,41 @@ async def home(update, context, project=None):
             if not project["folder_ids"] or f["id"] in project["folder_ids"]
         ]
         video = f"{project['video_mode']}: " + ", ".join(names)
-    overlays = (
-        ", ".join(f"{Path(o.source).name} / {o.blend}" for o in cfg.overlays) or "OFF"
+    overlays = f"{len(cfg.overlays)} слоёв" if cfg.overlays else "Нет"
+    beat_name = Path(project["beat"]).name if project.get("beat") else "Не выбран"
+    ready = bool(
+        project.get("beat")
+        and analysis
+        and (project.get("video_id") or project.get("video_mode") != "single")
     )
     text = (
-        f"🎬 Video Generator · {project['name']}\n\n"
-        f"Beat: {Path(project['beat']).name if project.get('beat') else 'Отправьте аудио'}\n"
-        f"BPM: {analysis.get('bpm', project.get('bpm_hint')) or '—'} · {format_time(analysis.get('duration', 0))}\n"
-        f"Video: {video}\nStyle: {cfg.name}\n"
-        f"{cfg.canvas.width}×{cfg.canvas.height} / {cfg.canvas.fps or 'Source'} FPS\n"
-        f"Ambient: {cfg.background.mode} / Blur {cfg.background.blur:g}\n"
-        f"Overlay: {overlays}\nBlackout: {'ON' if cfg.blackout.enabled else 'OFF'} / {cfg.blackout.strength:g}%\n"
-        f"Sections: {len(analysis.get('sections', []))} · {'✅ Confirmed' if project.get('sections_confirmed') else 'требуют проверки'}\n"
-        f"Export: {cfg.export.codec} / CRF {cfg.export.crf} / AAC {cfg.export.audio_bitrate}\n"
-        f"Mode: {'🛠 Advanced' if project['advanced'] else '⚡ Simple'}"
+        f"🎬 Видео · {project['name']}\n\n"
+        f"Бит · {beat_name}\nТемп · {analysis.get('bpm', project.get('bpm_hint')) or '—'} BPM  /  {format_time(analysis.get('duration', 0))}\n"
+        f"Видео · {video}\nСтиль · {cfg.name}\nOverlay · {overlays}\n\n"
+        f"{cfg.canvas.width} × {cfg.canvas.height}  ·  {cfg.canvas.fps or 'Исходная'} FPS\n"
+        f"Фон · {ui_value(cfg.background.mode)}  /  Затемнение · {ui_value(cfg.blackout.enabled)}\n"
+        f"Секции · {len(analysis.get('sections', []))} {'✓' if project.get('sections_confirmed') else '— проверьте'}\n\n"
+        + (
+            "Можно открыть превью или перейти к рендеру."
+            if ready
+            else "Начните с бита, затем выберите видео из библиотеки."
+        )
     )
     rows = [
-        [("🎵 Beat", "beat"), ("🎞 Change Video", "source")],
-        [("🖼 Overlay", "layers:overlays"), ("📁 Library", "library:0")],
-        [("📝 Sections", "sections:0"), ("🧠 Analysis", "analysis")],
-        [("⚙️ Video Settings", "settings"), ("💾 Presets", "presets")],
-        [("👁 Preview", "previews"), ("🚀 Render", "summary")],
-        [("📂 Projects", "projects"), ("⏳ Jobs", "jobs")],
-        [("Simple ↔ Advanced", "mode"), ("🔐 Connections", "connections")],
-        [("↩ Главное меню", "exit")],
+        [("🎵 Бит", "beat"), ("🎞 Видео", "source")],
+        [("🖼 Overlay", "layers:overlays"), ("📁 Библиотека", "library:0")],
+        [("⚙️ Настройки", "settings"), ("📝 Секции", "sections:0")],
+        [("👁 Превью", "previews"), ("🚀 Рендер", "summary")],
+    ]
+    if project["advanced"]:
+        rows += [
+            [("🧠 Анализ", "analysis"), ("💾 Пресеты", "presets")],
+            [("📂 Проекты", "projects"), ("⏳ Задания", "jobs")],
+        ]
+    else:
+        rows += [[("📂 Проекты", "projects"), ("💾 Пресеты", "presets")]]
+    rows += [
+        [("Простой режим" if project["advanced"] else "Расширенный режим", "mode")]
     ]
     await screen(update, project, text, rows)
 
@@ -151,6 +159,8 @@ async def open_video(update, context):
         )
         raise ApplicationHandlerStop
     ACTIVE_USERS.add(update.effective_user.id)
+    context.user_data["ui_section"] = "video"
+    context.user_data.pop("ui_input", None)
     context.user_data.pop("vg_input", None)
     await home(update, context)
     raise ApplicationHandlerStop
@@ -184,16 +194,22 @@ async def settings_menu(update, project):
     )
     rows = [[(label, f"category:{name}:0")] for name, label in groups.items()]
     rows += [
-        [("🖼 Overlays", "layers:overlays"), ("📝 Branding / Text", "layers:branding")],
+        [("🖼 Слои overlay", "layers:overlays"), ("📝 Текст", "layers:branding")],
         [
-            ("💾 Presets", "presets"),
-            ("🔧 Advanced" if not project["advanced"] else "⚡ Simple", "mode"),
+            ("💾 Пресеты", "presets"),
+            (
+                "Расширенный режим" if not project["advanced"] else "Простой режим",
+                "mode",
+            ),
         ],
-        [("↩ Reset to preset", "resetpreset"), ("👁 Preview", "previews")],
-        [("✅ Done", "home")],
+        [("↺ По пресету", "resetpreset"), ("👁 Превью", "previews")],
+        [("✓ Готово", "home")],
     ]
     await screen(
-        update, project, "⚙️ Video Settings\nИзменения сохраняются автоматически.", rows
+        update,
+        project,
+        "⚙️ Настройки видео\n\nИзменения сохраняются автоматически.",
+        rows,
     )
 
 
@@ -201,11 +217,11 @@ async def category_menu(update, project, path, page=0):
     cfg = VideoRenderConfig.from_dict(project["settings"])
     model = model_at(cfg, path)
     descriptors = list(fields(model))
-    page = max(0, min(page, (len(descriptors) - 1) // 8))
+    page = max(0, min(page, (len(descriptors) - 1) // 6))
     rows = []
-    for descriptor in descriptors[page * 8 : page * 8 + 8]:
+    for descriptor in descriptors[page * 6 : page * 6 + 6]:
         value = getattr(model, descriptor.name)
-        label = "ON" if value is True else "OFF" if value is False else str(value)
+        label = ui_value(value, descriptor.name)
         if isinstance(value, str) and (
             "source" == descriptor.name
             or "font" == descriptor.name
@@ -213,12 +229,17 @@ async def category_menu(update, project, path, page=0):
         ):
             label = Path(value).name if value else "—"
         rows.append(
-            [(f"{descriptor.name}: {label[:35]}", f"field:{path}:{descriptor.name}")]
+            [
+                (
+                    f"{ui_label(descriptor.name)} · {label[:35]}",
+                    f"field:{path}:{descriptor.name}",
+                )
+            ]
         )
     rows.append(
         [
             ("⬅️", f"category:{path}:{max(0, page - 1)}"),
-            ("➡️", f"category:{path}:{min((len(descriptors) - 1) // 8, page + 1)}"),
+            ("➡️", f"category:{path}:{min((len(descriptors) - 1) // 6, page + 1)}"),
         ]
     )
     if path == "background":
@@ -234,13 +255,13 @@ async def category_menu(update, project, path, page=0):
     if path == "export":
         rows.append([("🎬 Quality Presets", "qualities")])
     rows += [
-        [("↩ Reset category", f"resetcat:{path}"), ("👁 Preview", "previews")],
-        [("✅ Done", "settings")],
+        [("↺ Сбросить", f"resetcat:{path}"), ("👁 Превью", "previews")],
+        [("✓ Готово", "settings")],
     ]
     await screen(
         update,
         project,
-        f"⚙️ {path} · {page + 1}/{(len(descriptors) - 1) // 8 + 1}",
+        f"⚙️ {ui_label(path)} · {page + 1}/{(len(descriptors) - 1) // 6 + 1}\n\nИзменения сохраняются автоматически.",
         rows,
     )
 
@@ -255,11 +276,15 @@ async def field_menu(update, project, path, name):
     meta = descriptor.metadata
     if descriptor.type is bool:
         rows = [
-            [("ON", f"set:{path}:{name}:true"), ("OFF", f"set:{path}:{name}:false")]
+            [
+                ("Вкл ●", f"set:{path}:{name}:true"),
+                ("Выкл ○", f"set:{path}:{name}:false"),
+            ]
         ]
     elif "choices" in meta:
         rows = [
-            [(str(option), f"set:{path}:{name}:{option}")] for option in meta["choices"]
+            [(ui_value(option, name), f"set:{path}:{name}:{option}")]
+            for option in meta["choices"]
         ]
     elif "min" in meta:
         step = meta.get("step", 1)
@@ -268,10 +293,10 @@ async def field_menu(update, project, path, name):
                 (f"{delta:+g}", f"adjust:{path}:{name}:{delta:g}")
                 for delta in (-10 * step, -step, step, 10 * step)
             ],
-            [("⌨️ Enter manually", f"inputfield:{path}:{name}")],
+            [("⌨️ Ввести число", f"inputfield:{path}:{name}")],
         ]
     else:
-        rows = [[("⌨️ Enter manually", f"inputfield:{path}:{name}")]]
+        rows = [[("⌨️ Ввести число", f"inputfield:{path}:{name}")]]
         if name == "font":
             rows = [[("Choose installed font", f"fonts:{path}:0")]]
         if name == "source":
@@ -284,11 +309,20 @@ async def field_menu(update, project, path, name):
                 ]
             ]
     rows += [[("↩ Назад", f"category:{path}:0")]]
+    gauge = ""
+    if "min" in meta:
+        ratio = (value - meta["min"]) / max(meta["max"] - meta["min"], 1)
+        filled = round(ratio * 12)
+        gauge = (
+            "\n"
+            + "●" * filled
+            + "○" * (12 - filled)
+            + f"\n\nДиапазон · {meta['min']}–{meta['max']}"
+        )
     await screen(
         update,
         project,
-        f"{path}.{name}\nТекущее значение: {value}\n"
-        + (f"Range: {meta['min']}..{meta['max']}" if "min" in meta else ""),
+        f"⚙️ {ui_label(name)}\n{ui_label(path.split('.')[0])}\n\n{ui_value(value, name)}{gauge}",
         rows,
     )
 
@@ -341,8 +375,8 @@ def mutate_field(project, path, name, value, delta=False):
 
 async def prompt(update, context, project, action, text):
     context.user_data["vg_input"] = {"project_id": project["id"], "action": action}
-    await update.effective_message.reply_text(
-        text, reply_markup=keyboard(project, [[("↩ Отмена", "home")]])
+    await screen(
+        update, project, "✏️ Ввод значения\n\n" + text, [[("‹ Отмена", "home")]]
     )
 
 
@@ -358,7 +392,10 @@ async def library_menu(update, project, page=0):
         [("↩ Назад", "home")],
     ]
     await screen(
-        update, project, "📁 Video Library\nПапки не ограничены категориями.", rows
+        update,
+        project,
+        "📁 Библиотека видео\n\nВыберите папку или добавьте свою.",
+        rows,
     )
 
 
@@ -378,7 +415,9 @@ async def folder_menu(update, project, fid, page=0):
         ],
         [("🗑 Delete empty folder", f"deletefolder:{fid}"), ("↩ Folders", "library:0")],
     ]
-    await screen(update, project, f"📁 {folder['name']}\nVideos: {len(videos)}", rows)
+    await screen(
+        update, project, f"📁 {folder['name']}\n\nРоликов · {len(videos)}", rows
+    )
 
 
 async def source_menu(update, project):
@@ -393,7 +432,7 @@ async def source_menu(update, project):
     await screen(
         update,
         project,
-        f"Video source: {project['video_mode']}\nSeed: {project['seed']}",
+        f"🎞 Источник видео\n\nРежим · {dict(single='Один ролик', random='Рандом', sequence='Микс').get(project['video_mode'])}\nSeed · {project['seed']}",
         rows,
     )
 
@@ -539,7 +578,10 @@ async def callback(update, context):
         raise ApplicationHandlerStop
     await query.answer()
     ACTIVE_USERS.add(update.effective_user.id)
+    context.user_data["ui_section"] = "video"
+    context.user_data.pop("ui_input", None)
     parts = query.data.split(":")[1:]
+    project = None
     try:
         if parts[0].isdigit():
             pid = int(parts.pop(0))
@@ -627,12 +669,9 @@ async def callback(update, context):
         elif action == "home":
             await home(update, context, project)
         elif action == "exit":
-            ACTIVE_USERS.discard(uid)
-            from menu_manager import get_main_keyboard
+            from studio_menu import select
 
-            await update.effective_message.reply_text(
-                "🎛 Главное меню", reply_markup=get_main_keyboard()
-            )
+            await select(update, context, "home")
         elif action == "mode":
             project["advanced"] = not project["advanced"]
             projects.save_project(project)
@@ -972,7 +1011,7 @@ async def callback(update, context):
                 update,
                 project,
                 "AUTO source folders\nПустой выбор = All videos.",
-                rows + [[("All videos", "allfolders"), ("✅ Done", "home")]],
+                rows + [[("All videos", "allfolders"), ("✓ Готово", "home")]],
             )
         elif action == "togglefolder":
             fid = int(parts[0])
@@ -995,7 +1034,7 @@ async def callback(update, context):
                 update,
                 project,
                 "AUTO source folders",
-                rows + [[("All videos", "allfolders"), ("✅ Done", "home")]],
+                rows + [[("All videos", "allfolders"), ("✓ Готово", "home")]],
             )
         elif action == "allfolders":
             project["folder_ids"] = []
@@ -1021,7 +1060,7 @@ async def callback(update, context):
             await screen(
                 update,
                 project,
-                "🖼 Overlays" if group == "overlays" else "📝 Branding / Text",
+                "🖼 Слои overlay" if group == "overlays" else "📝 Текст",
                 rows,
             )
         elif action == "addlayer":
@@ -1293,7 +1332,12 @@ async def callback(update, context):
             await screen(
                 update,
                 project,
-                json.dumps(item, ensure_ascii=False, indent=2),
+                (
+                    f"💥 Drop · #{index + 1}\n\n{format_time(item['timestamp'], True)}\nУверенность · {item['confidence']:.0%}"
+                    if group == "drops"
+                    else f"🌑 Тихая пауза · #{index + 1}\n\n{format_time(item['start'], True)} → {format_time(item['end'], True)}\nСила · {item['strength']:.0%}"
+                )
+                + f"\nСтатус · {ui_value(item.get('enabled', True))}",
                 [
                     [
                         ("Enable / Disable", f"toggleevent:{group}:{index}"),
@@ -1355,7 +1399,7 @@ async def callback(update, context):
             await screen(
                 update,
                 project,
-                "👁 Preview · 720p\nFinal export settings не меняются.",
+                "👁 Превью · 720p\n\nВыберите фрагмент до 15 секунд.\nНастройки финального экспорта сохраняются.",
                 [
                     [("Drop Preview", "preview:drop")],
                     [("First 10 sec", "preview:first")],
@@ -1408,7 +1452,7 @@ async def callback(update, context):
                     project,
                     f"🎬 {cfg.name}\n{cfg.canvas.width}×{cfg.canvas.height} / {cfg.canvas.fps or 'Source'} FPS\nCrop: {cfg.foreground.crop}\nAmbient: {cfg.background.mode} / Blur {cfg.background.blur}\nBlackout: {cfg.blackout.enabled} / {cfg.blackout.strength}%\nSections: {len(project['analysis']['sections'])}\nExport: {cfg.export.codec} / CRF {cfg.export.crf}\nAudio: AAC {cfg.export.audio_bitrate} kbps, без обработки.",
                     [
-                        [("👁 Preview", "previews"), ("⚙️ Edit", "settings")],
+                        [("👁 Превью", "previews"), ("⚙️ Edit", "settings")],
                         [("🚀 Render", "render")],
                         [("↩ Home", "home")],
                     ],
@@ -1608,9 +1652,11 @@ async def callback(update, context):
         IndexError,
         sqlite3.IntegrityError,
     ) as error:
-        await update.effective_message.reply_text(
-            f"❌ {str(error)[:1000]}",
-            reply_markup=keyboard(None, [[("🎬 /video", "home")]]),
+        await screen(
+            update,
+            project,
+            "Проверьте настройку\n\n" + str(error)[:1000],
+            [[("‹ Видео", "home")]],
         )
     raise ApplicationHandlerStop
 
@@ -1675,35 +1721,92 @@ async def download(update, target, context=None):
     )
 
 
+def is_audio_message(message):
+    if message.audio:
+        return True
+    document = message.document
+    return bool(
+        document
+        and (
+            (document.mime_type or "").startswith("audio/")
+            or Path(document.file_name or "").suffix.lower()
+            in {
+                ".wav",
+                ".mp3",
+                ".flac",
+                ".m4a",
+                ".aac",
+                ".ogg",
+                ".opus",
+                ".aiff",
+                ".aif",
+            }
+        )
+    )
+
+
+def legacy_navigation(text):
+    from menu_manager import get_main_keyboard
+
+    buttons = {b.text for row in get_main_keyboard(is_admin=True).keyboard for b in row}
+    buttons.difference_update({"🎬 Video Generator", "🎬 Видео"})
+    return text in buttons or text in {
+        "🎨 Выбор стиля",
+        "⚙️ Настройка стиля",
+        "🔢 BPM таймкоды",
+        "🔔 Уведомления о перезапуске",
+        "🗂 BPM пресеты",
+        "🛒 BPM магазин",
+        "🏠 Главное меню",
+        "⬅️ Назад в меню",
+        "🖼 Обложки",
+        "🎵 BPM и таймкоды",
+        "🎧 MP3 и публикация",
+        "⚙️ Бот",
+        "👥 Доступ к боту",
+    }
+
+
 async def message(update, context):
+    incoming = update.effective_message
+    pending = context.user_data.get("vg_input")
+    if pending and pending["project_id"] != context.user_data.get("vg_project"):
+        pending = None
+        context.user_data.pop("vg_input", None)
+    if legacy_navigation(incoming.text) or (
+        not pending
+        and not is_audio_message(incoming)
+        and incoming.text not in {"🎬 Video Generator", "⬅️ Назад"}
+    ):
+        await exit_on_start(update, context)
+        return
     try:
         project = current(update, context)
-        pending = context.user_data.get("vg_input")
-        if pending and pending["project_id"] != project["id"]:
-            pending = None
-            context.user_data.pop("vg_input", None)
-        if update.effective_message.text and not pending:
-            if update.effective_message.text == "🎬 Video Generator":
-                await home(update, context, project)
-            elif update.effective_message.text == "⬅️ Назад":
-                ACTIVE_USERS.discard(update.effective_user.id)
-                from menu_manager import get_main_keyboard
+        if incoming.text == "⬅️ Назад":
+            await exit_on_start(update, context)
 
-                await update.effective_message.reply_text(
-                    "🎛 Главное меню", reply_markup=get_main_keyboard()
-                )
-            else:
-                await home(update, context, project)
-        elif pending and update.effective_message.text:
+            from studio_menu import select
+
+            await select(update, context, "home")
+        elif incoming.text == "🎬 Video Generator":
+            await home(update, context, project)
+        elif pending and incoming.text:
             await text_input(update, context, project, pending["action"])
+            await dismiss_input(update)
         else:
-            action = pending["action"] if pending else "beat"
-            await media_input(update, context, project, action)
+            await media_input(
+                update, context, project, pending["action"] if pending else "beat"
+            )
     except (MediaError, ValueError, sqlite3.IntegrityError) as error:
-        await update.effective_message.reply_text(f"❌ {str(error)[:1200]}")
+        await screen(
+            update,
+            None,
+            "Проверьте значение\n\n" + str(error)[:1200],
+            [[("‹ Видео", "home")]],
+        )
     except TelegramError as error:
         logger.warning("Video upload/download failed: %s", error)
-        await update.effective_message.reply_text(
+        await incoming.reply_text(
             "❌ Telegram не смог передать файл. Проверьте лимит Bot API или используйте локальную Library."
         )
     raise ApplicationHandlerStop
@@ -2162,14 +2265,20 @@ def register(application):
     application.add_handler(CommandHandler("videoimport", import_local), group=-1)
     application.add_handler(CommandHandler("videobeat", local_beat), group=-1)
     application.add_handler(CommandHandler("videoanalysis", debug_analysis), group=-1)
-    application.add_handler(CommandHandler("start", exit_on_start), group=-1)
+    application.add_handler(MessageHandler(filters.COMMAND, exit_on_start), group=-1)
     application.add_handler(CallbackQueryHandler(callback, pattern=r"^vg:"), group=-1)
+    application.add_handler(
+        CallbackQueryHandler(exit_on_start, pattern=r"^(?!vg:)"), group=-1
+    )
     application.add_handler(
         MessageHandler(filters.Regex("^🎬 Video Generator$"), open_video), group=-1
     )
     application.add_handler(
         MessageHandler(VideoMessages() & ~filters.COMMAND, message), group=-1
     )
+    from studio_menu import register as register_studio
+
+    register_studio(application)
     previous_init = application.post_init
 
     async def initialize(app):

@@ -85,5 +85,5 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(parse_audio_filename("beat 142 BPM.mp3")["bpm"], "142")
         keyboard = get_main_keyboard()
         labels = {b.text for row in keyboard.keyboard for b in row}
-        self.assertIn("🔢 BPM таймкоды", labels)
-        self.assertIn("🎬 Video Generator", labels)
+        self.assertIn("🎚 BPM", labels)
+        self.assertIn("🎬 Видео", labels)
