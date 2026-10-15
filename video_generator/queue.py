@@ -43,7 +43,7 @@ class RenderQueue:
         self.concurrency = concurrency
         self.capacity = asyncio.Condition()
         self.running = 0
-        self.last_updates = {}
+        self.status_messages = {}
 
     async def start(self):
         library.storage()
@@ -127,6 +127,40 @@ class RenderQueue:
         except TelegramError as error:
             logger.warning("Job notification failed: %s", error)
             return None
+
+    async def status(self, jid, chat_id, text, reply_markup=None, terminal=False):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from telegram.error import BadRequest, TelegramError
+
+        if reply_markup is None:
+            rows = (
+                []
+                if terminal
+                else [
+                    [InlineKeyboardButton("Отменить", callback_data=f"vg:cancel:{jid}")]
+                ]
+            )
+            rows.append([InlineKeyboardButton("Задания", callback_data="vg:jobs")])
+            reply_markup = InlineKeyboardMarkup(rows)
+        previous = self.status_messages.get(jid)
+        if previous:
+            try:
+                await previous.edit_text(text, reply_markup=reply_markup)
+                return previous
+            except BadRequest as error:
+                if "not modified" in str(error).lower():
+                    return previous
+                if not any(
+                    value in str(error).lower()
+                    for value in ("not found", "can't be edited", "can not be edited")
+                ):
+                    raise
+            except TelegramError:
+                return previous
+        message = await self.notify(chat_id, text, reply_markup=reply_markup)
+        if message:
+            self.status_messages[jid] = message
+        return message
 
     async def analyze(self, project, work, cancel):
         cfg = VideoRenderConfig.from_dict(project["settings"])
@@ -264,23 +298,23 @@ class RenderQueue:
                     f"Видео готово, но Telegram не принял загрузку. Файл сохранён: {path}. Можно повторить отправку в Jobs.",
                 )
         if not preview:
-            content = f"BPM: {analysis['bpm']:g}\n\nSections (heuristic):\n{timestamps(analysis)}"
-            for part in (content[i : i + 3500] for i in range(0, len(content), 3500)):
-                await self.notify(chat_id, part)
-            await self.notify(
-                chat_id,
-                "YouTube timestamps",
-                reply_markup=InlineKeyboardMarkup(
+            content = f"{analysis['bpm']:g} BPM · Секции\n\n{timestamps(analysis)}"
+            controls = InlineKeyboardMarkup(
+                [
                     [
-                        [
-                            InlineKeyboardButton(
-                                "📋 Copy YouTube timestamps",
-                                callback_data=f"vg:jobtimestamps:{jid}",
-                            )
-                        ]
+                        InlineKeyboardButton(
+                            "📋 YouTube timestamps",
+                            callback_data=f"vg:jobtimestamps:{jid}",
+                        )
                     ]
-                ),
+                ]
             )
+            for index in range(0, len(content), 3500):
+                await self.notify(
+                    chat_id,
+                    content[index : index + 3500],
+                    reply_markup=controls if index + 3500 >= len(content) else None,
+                )
 
     async def auto_publish(self, uid, chat_id, output, project, analysis, cancel):
         from .connections import load, send_large, upload_youtube
@@ -374,6 +408,7 @@ class RenderQueue:
                         self.capacity.notify_all()
                 self.queue.task_done()
                 self.cancellations.pop(jid, None)
+                self.status_messages.pop(jid, None)
 
     async def process(self, jid):
         rows = video_rows("SELECT * FROM video_render_jobs WHERE id=?", (jid,))
@@ -397,7 +432,11 @@ class RenderQueue:
                 analysis = project.get("analysis")
                 if kind == "analysis" or not analysis:
                     projects.job_update(uid, jid, status="analyzing")
-                    await self.notify(chat_id, f"🧠 Analyzing audio… Job #{jid}")
+                    await self.status(
+                        jid,
+                        chat_id,
+                        f"🧠 Анализ аудио · #{jid}\n\nОпределяем секции, Drop и тихие паузы…",
+                    )
                     analysis = await self.analyze(project, work, cancel)
                     project["analysis"] = analysis
                     project["sections_confirmed"] = False
@@ -417,14 +456,15 @@ class RenderQueue:
                     projects.job_update(uid, jid, status="done", progress=1)
                     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-                    await self.notify(
+                    await self.status(
+                        jid,
                         chat_id,
-                        f"🧠 Analysis Result\nBPM: {analysis['bpm']:g}\nSections: {len(analysis['sections'])}\nDrops: {len(analysis['drops'])}\nQuiet gaps: {len(analysis['quiet_regions'])}\n\nЭвристический анализ: проверьте и подтвердите sections.",
+                        f"✓ Анализ готов · #{jid}\n\n{analysis['bpm']:g} BPM\nСекции · {len(analysis['sections'])}\nDrop · {len(analysis['drops'])}\nТихие паузы · {len(analysis['quiet_regions'])}\n\nПроверьте секции перед рендером.",
                         reply_markup=InlineKeyboardMarkup(
                             [
                                 [
                                     InlineKeyboardButton(
-                                        "📝 Открыть project",
+                                        "📝 Открыть проект",
                                         callback_data=f"vg:open:{project['id']}",
                                     )
                                 ]
@@ -506,9 +546,10 @@ class RenderQueue:
                         )
                     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-                    message = await self.notify(
+                    message = await self.status(
+                        jid,
                         chat_id,
-                        f"Preparing video… Job #{jid}",
+                        f"🎬 Подготовка видео · #{jid}\n\n{progress_bar(0)}",
                         reply_markup=InlineKeyboardMarkup(
                             [
                                 [
@@ -533,7 +574,7 @@ class RenderQueue:
 
                             try:
                                 await message.edit_text(
-                                    f"🎬 Rendering · Job #{jid}\n{progress_bar(value)}",
+                                    f"🎬 Рендер · #{jid}\n\n{progress_bar(value)}",
                                     reply_markup=message.reply_markup,
                                 )
                             except TelegramError:
@@ -585,6 +626,12 @@ class RenderQueue:
                 projects.job_update(
                     uid, jid, status="done", progress=1, output=str(output)
                 )
+                await self.status(
+                    jid,
+                    chat_id,
+                    f"✓ Видео готово · #{jid}\n\n{progress_bar(1)}",
+                    terminal=True,
+                )
                 await self.deliver(chat_id, output, analysis, jid, kind == "preview")
                 if kind == "render":
                     await self.auto_publish(
@@ -595,7 +642,7 @@ class RenderQueue:
                 output.unlink(missing_ok=True)
             if projects.job(uid, jid)["status"] in ("queued", "analyzing", "rendering"):
                 projects.job_update(uid, jid, status="cancelled")
-            await self.notify(chat_id, f"❌ Job #{jid} отменён.")
+            await self.status(jid, chat_id, f"Рендер отменён · #{jid}", terminal=True)
             if asyncio.current_task().cancelling():
                 raise
         except Exception as error:
@@ -609,4 +656,9 @@ class RenderQueue:
                 if isinstance(error, (MediaError, ValueError))
                 else "Не удалось выполнить job. Проверьте server log."
             )
-            await self.notify(chat_id, f"❌ Job #{jid}: {text[:1500]}")
+            await self.status(
+                jid,
+                chat_id,
+                f"Не удалось завершить · #{jid}\n\n{text[:1500]}",
+                terminal=True,
+            )

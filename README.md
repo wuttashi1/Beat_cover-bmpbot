@@ -41,6 +41,21 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch and contribution guidelines.
 
 ## Video Generator
 
+### Studio navigation
+
+Open `/menu` (or `/start`) for the shared Studio panel. Switch between **Обложка**,
+**Видео** and **BPM** using the bottom buttons, or `/cover`, `/video`, `/bpm`.
+Menus edit the existing panel; numeric settings offer small/large steps, a visual
+gauge and exact entry. Switching tools clears unfinished input without resetting
+saved video projects or artwork settings.
+
+Artwork accepts photos and image documents. Its original is retained in
+`data/cover_sources/`; **Обновить превью** reuses it and updates the existing preview.
+Render stages and the progress bar update one status message per job. Output files
+and explicitly requested copies of timestamps remain separate messages.
+
+### Creating a video
+
 Open **🎬 Video Generator** or `/video` in a private chat. Send a beat, select a
 library video/folder, optionally add overlays, review **Sections → Confirm**, then
 use **Preview** or **Render**. Random selects one video per track; Mix/Sequence

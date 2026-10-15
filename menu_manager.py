@@ -11,11 +11,9 @@ ADMIN_PANEL = 15
 
 def get_main_keyboard(is_admin=False):
     rows = [
-        ["🎨 Выбор стиля", "⚙️ Настройка стиля"],
-        ["🔢 BPM таймкоды", "🔔 Уведомления о перезапуске"],
-        ["🗂 BPM пресеты", "🛒 BPM магазин"],
+        ["🖼 Обложка", "🎬 Видео", "🎚 BPM"],
+        ["🎧 MP3 и публикация", "⚙️ Бот"],
     ]
-    rows.append(["🎬 Video Generator"])
     if is_admin:
         rows.append(["🛠 Админ панель"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
